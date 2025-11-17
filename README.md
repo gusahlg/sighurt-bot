@@ -1,0 +1,1 @@
+Sighurt is a modern Discord bot empowered by Rust and the Twilight library. Sighurt is specialized to be light weight, quick and highly customizable, acting as a helpful complement for server management. 
