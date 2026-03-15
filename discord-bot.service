@@ -1,0 +1,30 @@
+[Unit]
+Description=Discord Moderation Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=discord-bot
+Group=discord-bot
+WorkingDirectory=/opt/discord-bot
+ExecStart=/opt/discord-bot/discord-bot
+Restart=always
+RestartSec=10
+
+# Environment
+EnvironmentFile=/opt/discord-bot/.env
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/discord-bot/data
+
+# Resource limits (good for Raspberry Pi)
+MemoryMax=256M
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target

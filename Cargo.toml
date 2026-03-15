@@ -1,0 +1,53 @@
+[package]
+name = "discord-bot"
+version = "0.1.0"
+edition = "2021"
+description = "A Discord moderation bot using Twilight, optimized for Raspberry Pi"
+
+[dependencies]
+# Twilight Discord framework (minimal features)
+twilight-gateway = "0.15"
+twilight-http = "0.15"
+twilight-model = "0.15"
+
+# Async runtime (minimal features for Pi 4)
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+# Database
+sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio", "sqlite"] }
+
+# Configuration
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+dotenvy = "0.15"
+
+# Logging (minimal)
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Performance optimizations
+aho-corasick = "1"
+parking_lot = "0.12"
+lru = "0.12"
+time = { version = "0.3", features = ["formatting"] }
+
+# AI mode support (feature-gated for optional build)
+[features]
+default = []
+ai = []
+
+[profile.release]
+opt-level = "s"          # Optimize for size (better for Pi 4 cache)
+lto = true               # Link-time optimization
+codegen-units = 1        # Single codegen unit for better optimization
+strip = true             # Strip symbols
+panic = "abort"          # Smaller binary, no unwinding
+
+[profile.release-fast]
+inherits = "release"
+opt-level = 3            # Maximum speed (use for AI-heavy workloads)

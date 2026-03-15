@@ -1,0 +1,22 @@
+# Discord Moderation Bot Configuration
+
+[automod]
+# Enable spam detection by default
+spam_enabled = true
+# Messages per interval to trigger spam detection
+spam_threshold = 5
+# Interval in seconds for spam detection
+spam_interval = 5
+
+# Enable raid protection by default
+raid_enabled = true
+# Joins per interval to trigger raid mode
+raid_threshold = 10
+# Interval in seconds for raid detection
+raid_interval = 10
+
+[moderation]
+# Default reason when none provided
+default_reason = "No reason provided"
+# Default message delete days for bans (0-7)
+default_delete_days = 1

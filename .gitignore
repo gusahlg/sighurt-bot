@@ -1,0 +1,21 @@
+# Build artifacts
+/target/
+
+# Environment (contains secrets)
+.env
+
+# Database files
+/data/*.db
+/data/*.db-journal
+/data/*.db-wal
+/data/*.db-shm
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
