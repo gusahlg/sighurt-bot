@@ -1,6 +1,6 @@
 # Discord Moderation Bot
 
-A Discord moderation bot written in Rust using the Twilight framework. Optimized for 24/7 operation on Raspberry Pi.
+A Discord moderation bot written in Rust using the Twilight framework. Optimized for 24/7 operation on a Raspberry Pi (tested on Pi 4).
 
 ## Features
 
