@@ -2,12 +2,14 @@ pub mod message;
 
 use crate::ai::AiProcessor;
 use crate::automod::AutoMod;
+use crate::chat::ChatRuntime;
 use crate::commands;
 use crate::database::models::get_autorole;
 use sqlx::SqlitePool;
 use std::sync::Arc;
 use twilight_gateway::Event;
 use twilight_http::Client;
+use twilight_model::id::{Id, marker::UserMarker};
 
 pub async fn handle_event(
     event: Event,
@@ -15,6 +17,8 @@ pub async fn handle_event(
     pool: SqlitePool,
     automod: Arc<AutoMod>,
     ai: Arc<AiProcessor>,
+    chat: Option<Arc<ChatRuntime>>,
+    bot_user_id: Id<UserMarker>,
 ) {
     match event {
         Event::Ready(ready) => {
@@ -35,17 +39,25 @@ pub async fn handle_event(
             });
         }
         Event::MessageCreate(msg) => {
-            // Skip bot and webhook messages
-            if msg.author.bot || msg.webhook_id.is_some() {
-                return;
-            }
-
+            // The bot/webhook filter has moved into handle_message so the
+            // per-channel logger sees ALL messages (we want to capture our
+            // own outgoing replies for training data).
             let http = Arc::clone(&http);
             let automod = Arc::clone(&automod);
             let ai = Arc::clone(&ai);
+            let chat = chat.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = message::handle_message(&msg.0, &http, &automod, &ai).await {
+                if let Err(e) = message::handle_message(
+                    &msg.0,
+                    &http,
+                    &automod,
+                    &ai,
+                    chat.as_deref(),
+                    bot_user_id,
+                )
+                .await
+                {
                     tracing::error!("Error handling message: {}", e);
                 }
             });

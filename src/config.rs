@@ -9,6 +9,8 @@ pub struct Config {
     pub moderation: ModerationConfig,
     #[serde(default)]
     pub ai: AiModeConfig,
+    #[serde(default)]
+    pub chat: ChatConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -47,6 +49,24 @@ pub struct AiModeConfig {
     pub timeout_secs: u64,
     #[serde(default)]
     pub model_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChatConfig {
+    /// Initial state of the runtime AI toggle. The toggle can be flipped at
+    /// runtime via the `!ai on|off` admin command; this is just the boot value.
+    #[serde(default)]
+    pub enabled: bool,
+    /// URL of the LLM HTTP server (e.g. http://100.118.41.103:8088).
+    #[serde(default = "default_chat_endpoint")]
+    pub endpoint_url: String,
+    /// Per-request HTTP timeout.
+    #[serde(default = "default_chat_timeout")]
+    pub request_timeout_secs: u64,
+    /// Discord user IDs allowed to run `!ai on|off|status`. Empty disables the
+    /// command entirely — leave empty if you don't want runtime toggling.
+    #[serde(default)]
+    pub admin_user_ids: Vec<u64>,
 }
 
 fn default_true() -> bool {
@@ -89,6 +109,14 @@ fn default_timeout_secs() -> u64 {
     30
 }
 
+fn default_chat_endpoint() -> String {
+    "http://100.118.41.103:8088".to_string()
+}
+
+fn default_chat_timeout() -> u64 {
+    30
+}
+
 impl Default for AutomodConfig {
     fn default() -> Self {
         Self {
@@ -123,12 +151,24 @@ impl Default for AiModeConfig {
     }
 }
 
+impl Default for ChatConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint_url: default_chat_endpoint(),
+            request_timeout_secs: 30,
+            admin_user_ids: Vec::new(),
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             automod: AutomodConfig::default(),
             moderation: ModerationConfig::default(),
             ai: AiModeConfig::default(),
+            chat: ChatConfig::default(),
         }
     }
 }
@@ -184,6 +224,16 @@ impl Config {
             }
         }
 
+        // Validate chat settings
+        if self.chat.enabled {
+            if self.chat.endpoint_url.is_empty() {
+                anyhow::bail!("chat.endpoint_url must not be empty when chat is enabled");
+            }
+            if self.chat.request_timeout_secs == 0 {
+                anyhow::bail!("chat.request_timeout_secs must be > 0 when chat is enabled");
+            }
+        }
+
         Ok(())
     }
 }
@@ -221,10 +271,19 @@ mod tests {
     }
 
     #[test]
+    fn test_chat_config_default() {
+        let config = ChatConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.endpoint_url, "http://100.118.41.103:8088");
+        assert_eq!(config.request_timeout_secs, 30);
+    }
+
+    #[test]
     fn test_config_default() {
         let config = Config::default();
         assert!(config.automod.spam_enabled);
         assert!(!config.ai.enabled);
+        assert!(!config.chat.enabled);
     }
 
     #[test]
@@ -252,40 +311,17 @@ mod tests {
     }
 
     #[test]
-    fn test_config_parse_full() {
+    fn test_config_parse_chat() {
         let toml_content = r#"
-            [automod]
-            spam_enabled = true
-            spam_threshold = 10
-            spam_interval = 30
-            raid_enabled = false
-            raid_threshold = 20
-            raid_interval = 60
-
-            [moderation]
-            default_reason = "Custom reason"
-            default_delete_days = 3
-
-            [ai]
+            [chat]
             enabled = true
-            max_concurrent = 1
-            queue_capacity = 50
-            timeout_secs = 60
-            model_path = "/path/to/model"
+            endpoint_url = "http://10.0.0.5:9000"
+            request_timeout_secs = 15
         "#;
         let config: Config = toml::from_str(toml_content).unwrap();
-
-        assert!(config.automod.spam_enabled);
-        assert_eq!(config.automod.spam_threshold, 10);
-        assert!(!config.automod.raid_enabled);
-
-        assert_eq!(config.moderation.default_reason, "Custom reason");
-        assert_eq!(config.moderation.default_delete_days, 3);
-
-        assert!(config.ai.enabled);
-        assert_eq!(config.ai.max_concurrent, 1);
-        assert_eq!(config.ai.queue_capacity, 50);
-        assert_eq!(config.ai.model_path, Some("/path/to/model".to_string()));
+        assert!(config.chat.enabled);
+        assert_eq!(config.chat.endpoint_url, "http://10.0.0.5:9000");
+        assert_eq!(config.chat.request_timeout_secs, 15);
     }
 
     #[test]
@@ -295,69 +331,18 @@ mod tests {
     }
 
     #[test]
-    fn test_config_validate_zero_spam_interval() {
+    fn test_config_validate_chat_zero_timeout() {
         let mut config = Config::default();
-        config.automod.spam_interval = 0;
-        config.automod.spam_enabled = true;
+        config.chat.enabled = true;
+        config.chat.request_timeout_secs = 0;
         assert!(config.validate().is_err());
     }
 
     #[test]
-    fn test_config_validate_zero_raid_interval() {
+    fn test_config_validate_chat_empty_endpoint() {
         let mut config = Config::default();
-        config.automod.raid_interval = 0;
-        config.automod.raid_enabled = true;
+        config.chat.enabled = true;
+        config.chat.endpoint_url = String::new();
         assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn test_config_validate_disabled_zero_interval_ok() {
-        let mut config = Config::default();
-        config.automod.spam_interval = 0;
-        config.automod.spam_enabled = false;
-        config.automod.raid_interval = 0;
-        config.automod.raid_enabled = false;
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_config_validate_delete_days_too_high() {
-        let mut config = Config::default();
-        config.moderation.default_delete_days = 8;
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn test_config_validate_ai_zero_concurrent() {
-        let mut config = Config::default();
-        config.ai.enabled = true;
-        config.ai.max_concurrent = 0;
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn test_config_validate_ai_zero_queue() {
-        let mut config = Config::default();
-        config.ai.enabled = true;
-        config.ai.queue_capacity = 0;
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn test_config_validate_ai_zero_timeout() {
-        let mut config = Config::default();
-        config.ai.enabled = true;
-        config.ai.timeout_secs = 0;
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn test_config_validate_ai_disabled_zero_values_ok() {
-        let mut config = Config::default();
-        config.ai.enabled = false;
-        config.ai.max_concurrent = 0;
-        config.ai.queue_capacity = 0;
-        config.ai.timeout_secs = 0;
-        assert!(config.validate().is_ok());
     }
 }

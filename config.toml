@@ -33,4 +33,4 @@ endpoint_url = "http://100.118.41.103:8088"
 request_timeout_secs = 30
 # Discord user IDs allowed to run `!ai on|off`. Leave empty to disable the
 # command entirely (status is still readable by anyone).
-admin_user_ids = []
+admin_user_ids = [367334632515043329]

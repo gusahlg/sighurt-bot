@@ -1,5 +1,6 @@
 mod ai;
 mod automod;
+mod chat;
 mod commands;
 mod config;
 mod database;
@@ -19,6 +20,7 @@ use twilight_model::id::Id;
 
 use crate::ai::{AiConfig, AiProcessor, AiProviderConfig};
 use crate::automod::AutoMod;
+use crate::chat::{ChatClient, ChatRuntime};
 use crate::config::Config;
 
 #[tokio::main]
@@ -63,6 +65,36 @@ async fn main() -> Result<()> {
         tracing::info!("AI mode enabled");
     }
 
+    // Build the chat runtime if LLM_API_KEY is present. `chat.enabled` controls
+    // the *initial* state of the runtime toggle, not whether the runtime exists,
+    // so admins listed in `chat.admin_user_ids` can flip it via `!ai on`.
+    let chat_runtime: Option<Arc<ChatRuntime>> = match env::var("LLM_API_KEY") {
+        Ok(key) => match ChatClient::new(&config.chat, key) {
+            Ok(client) => {
+                let runtime = ChatRuntime::new(
+                    client,
+                    config.chat.enabled,
+                    config.chat.admin_user_ids.clone(),
+                );
+                tracing::info!(
+                    "Chat runtime ready (initial = {}); LLM endpoint = {}; admins = {}",
+                    if config.chat.enabled { "ON" } else { "OFF" },
+                    config.chat.endpoint_url,
+                    config.chat.admin_user_ids.len(),
+                );
+                Some(runtime)
+            }
+            Err(e) => {
+                tracing::error!("Failed to build chat client: {}; chat disabled", e);
+                None
+            }
+        },
+        Err(_) => {
+            tracing::info!("LLM_API_KEY unset; chat runtime disabled");
+            None
+        }
+    };
+
     // Get Discord token
     let token = env::var("DISCORD_TOKEN").map_err(|_| {
         anyhow::anyhow!("DISCORD_TOKEN environment variable not set. See .env.example for setup.")
@@ -91,6 +123,17 @@ async fn main() -> Result<()> {
 
     // Create HTTP client
     let http = Arc::new(Client::new(token.clone()));
+
+    // Fetch bot user id so we can detect @-mentions in messages.
+    let bot_user_id = http
+        .current_user()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to fetch current user: {e}"))?
+        .model()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to decode current user: {e}"))?
+        .id;
+    tracing::info!("Bot user id = {}", bot_user_id);
 
     // Register slash commands
     commands::register_commands(&http, Id::new(application_id)).await?;
@@ -185,9 +228,10 @@ async fn main() -> Result<()> {
                 let pool = pool.clone();
                 let automod = Arc::clone(&automod);
                 let ai = Arc::clone(&ai_processor);
+                let chat = chat_runtime.clone();
 
                 tokio::spawn(async move {
-                    events::handle_event(event, http, pool, automod, ai).await;
+                    events::handle_event(event, http, pool, automod, ai, chat, bot_user_id).await;
                 });
             }
             _ = event_shutdown_rx.changed() => {
