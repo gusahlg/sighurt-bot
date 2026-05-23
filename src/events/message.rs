@@ -1,6 +1,9 @@
+use std::sync::Arc;
+
 use crate::ai::AiProcessor;
 use crate::automod::{AutoMod, AutoModAction};
 use crate::chat::ChatRuntime;
+use crate::voice::{self, VoiceBridge};
 use anyhow::Result;
 use discord_bot::channel_log;
 use twilight_http::Client;
@@ -15,6 +18,7 @@ pub async fn handle_message(
     automod: &AutoMod,
     ai: &AiProcessor,
     chat: Option<&ChatRuntime>,
+    voice_bridge: Option<&Arc<VoiceBridge>>,
     bot_user_id: Id<UserMarker>,
 ) -> Result<()> {
     // Log every message we see (including our own outgoing replies and
@@ -60,6 +64,16 @@ pub async fn handle_message(
     if let Some(chat) = chat {
         if let Some(cmd) = parse_ai_command(&message.content) {
             handle_ai_command(cmd, message, http, chat).await;
+            return Ok(());
+        }
+    }
+
+    // Voice command path: `!voice join|leave|status`. Same any-channel
+    // ergonomics as `!ai`; voice runs entirely server-side so there's no
+    // admin gate (server perms already control who can talk in voice).
+    if let Some(bridge) = voice_bridge {
+        if let Some(cmd) = voice::commands::parse(&message.content) {
+            voice::commands::handle(cmd, message, http, bridge).await;
             return Ok(());
         }
     }

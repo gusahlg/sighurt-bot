@@ -5,6 +5,7 @@ mod commands;
 mod config;
 mod database;
 mod events;
+mod voice;
 
 use anyhow::Result;
 use futures_util::StreamExt;
@@ -22,6 +23,7 @@ use crate::ai::{AiConfig, AiProcessor, AiProviderConfig};
 use crate::automod::AutoMod;
 use crate::chat::{ChatClient, ChatRuntime};
 use crate::config::Config;
+use crate::voice::VoiceBridge;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -141,12 +143,16 @@ async fn main() -> Result<()> {
     // Create automod
     let automod = Arc::new(AutoMod::new(pool.clone(), Arc::clone(&http)));
 
-    // Configure gateway intents
+    // Configure gateway intents. GUILD_VOICE_STATES is required for voice
+    // mode — Songbird needs voice state + voice server updates to join voice
+    // channels, and we look up the invoker's current voice channel via that
+    // intent's events.
     let intents = Intents::GUILDS
         | Intents::GUILD_MEMBERS
         | Intents::GUILD_MESSAGES
         | Intents::MESSAGE_CONTENT
-        | Intents::DIRECT_MESSAGES;
+        | Intents::DIRECT_MESSAGES
+        | Intents::GUILD_VOICE_STATES;
 
     // Create gateway config
     let gateway_config = GatewayConfig::new(token.clone(), intents);
@@ -159,6 +165,25 @@ async fn main() -> Result<()> {
 
     let shard_count = shards.len();
     tracing::info!("Created {} shard(s)", shard_count);
+
+    // Initialise voice mode if ELEVENLABS_AGENT_ID is set. Without it the bot
+    // runs in text-only mode — the `!voice` command path simply won't fire.
+    let voice_bridge: Option<Arc<VoiceBridge>> = match voice::VoiceConfig::from_env() {
+        Some(cfg) => match voice::init(bot_user_id, &shards, cfg) {
+            Ok(bridge) => {
+                tracing::info!("Voice mode enabled (ElevenLabs ConvAI bridge ready)");
+                Some(bridge)
+            }
+            Err(e) => {
+                tracing::error!("Voice init failed: {}; running text-only", e);
+                None
+            }
+        },
+        None => {
+            tracing::info!("ELEVENLABS_AGENT_ID unset; voice mode disabled");
+            None
+        }
+    };
 
     // Set up graceful shutdown signal
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -224,14 +249,29 @@ async fn main() -> Result<()> {
                     None => break,
                 };
 
+                // Feed Songbird every gateway event so it sees voice state /
+                // voice server updates. Cheap when voice is disabled (the
+                // Arc is just None) and required when it's on — Songbird's
+                // `join()` future awaits these events. We also update our
+                // own voice-state cache off VoiceStateUpdate so `!voice
+                // join` can look up which channel the invoker is in.
+                if let Some(bridge) = voice_bridge.as_ref() {
+                    voice::process_gateway_event(bridge, &event).await;
+                    if let twilight_gateway::Event::VoiceStateUpdate(vs) = &event {
+                        bridge.voice_states.apply_update(&vs.0);
+                    }
+                }
+
                 let http = Arc::clone(&http);
                 let pool = pool.clone();
                 let automod = Arc::clone(&automod);
                 let ai = Arc::clone(&ai_processor);
                 let chat = chat_runtime.clone();
+                let voice = voice_bridge.clone();
 
                 tokio::spawn(async move {
-                    events::handle_event(event, http, pool, automod, ai, chat, bot_user_id).await;
+                    events::handle_event(event, http, pool, automod, ai, chat, voice, bot_user_id)
+                        .await;
                 });
             }
             _ = event_shutdown_rx.changed() => {

@@ -40,6 +40,26 @@ time = { version = "0.3", features = ["formatting"] }
 # rustls (not native-tls) to avoid pulling OpenSSL onto the Pi build.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
+# Voice: Songbird (Twilight integration) drives Discord voice — joining
+# channels, decoding incoming Opus to 48kHz stereo PCM, and shipping outgoing
+# PCM. `receive` is required for the VoiceTick event (decoded mic audio);
+# `rustls` keeps us off OpenSSL on the Pi.
+songbird = { version = "0.4", default-features = false, features = ["twilight", "rustls", "driver", "gateway", "receive"] }
+symphonia-core = "0.5"
+
+# WebSocket client for ElevenLabs Conversational AI.
+tokio-tungstenite = { version = "0.21", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+futures = "0.3"
+
+# Songbird's EventHandler trait is `async_trait`-based.
+async-trait = "0.1"
+
+# Base64 frame encoding for ElevenLabs audio chunks.
+base64 = "0.22"
+
+# JSON for hand-rolled ElevenLabs WS messages.
+serde_json = "1"
+
 # AI mode support (feature-gated for optional build)
 [features]
 default = []

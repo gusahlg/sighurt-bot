@@ -22,8 +22,10 @@ ProtectHome=true
 PrivateTmp=true
 ReadWritePaths=/opt/discord-bot/data
 
-# Resource limits (good for Raspberry Pi)
-MemoryMax=256M
+# Resource limits — bumped to fit Songbird's audio mixer + a live ElevenLabs
+# WebSocket. Voice mode brings symphonia + tls buffers along for the ride;
+# 256M was tight even before. CPU stays at 50% — voice is mostly I/O.
+MemoryMax=512M
 CPUQuota=50%
 
 [Install]

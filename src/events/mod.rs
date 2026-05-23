@@ -5,6 +5,7 @@ use crate::automod::AutoMod;
 use crate::chat::ChatRuntime;
 use crate::commands;
 use crate::database::models::get_autorole;
+use crate::voice::VoiceBridge;
 use sqlx::SqlitePool;
 use std::sync::Arc;
 use twilight_gateway::Event;
@@ -18,6 +19,7 @@ pub async fn handle_event(
     automod: Arc<AutoMod>,
     ai: Arc<AiProcessor>,
     chat: Option<Arc<ChatRuntime>>,
+    voice: Option<Arc<VoiceBridge>>,
     bot_user_id: Id<UserMarker>,
 ) {
     match event {
@@ -46,6 +48,7 @@ pub async fn handle_event(
             let automod = Arc::clone(&automod);
             let ai = Arc::clone(&ai);
             let chat = chat.clone();
+            let voice = voice.clone();
 
             tokio::spawn(async move {
                 if let Err(e) = message::handle_message(
@@ -54,6 +57,7 @@ pub async fn handle_event(
                     &automod,
                     &ai,
                     chat.as_deref(),
+                    voice.as_ref(),
                     bot_user_id,
                 )
                 .await
