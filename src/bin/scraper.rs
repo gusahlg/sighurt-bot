@@ -1,10 +1,13 @@
-//! Discord history backfill scraper.
+//! Discord history backfill + catch-up scraper.
 //!
 //! One-shot binary. Reads DISCORD_TOKEN from the bot's `.env`, walks every
-//! guild the bot is in, and pages backward through every accessible
-//! text-channel into `data/channels/<bucket>/<channel_id>.tsv`. Resumable —
-//! re-run as needed; cursor state in `*.cursor` files means each run only
-//! fetches further back than the previous one.
+//! guild the bot is in (channels AND threads), pages backward through each
+//! one's history and then forward past the stored cursor into
+//! `data/channels/<bucket>/<channel_id>.tsv`. Resumable — re-run as needed;
+//! cursor state in `*.cursor` files means each run only fetches history it
+//! hasn't seen. The running bot performs the same scrape periodically
+//! in-process (see `[scrape]` in config.toml); this binary remains for
+//! manual/offline runs.
 
 use anyhow::Result;
 use std::sync::Arc;
@@ -32,7 +35,12 @@ async fn main() -> Result<()> {
 
     let http = Arc::new(Client::new(token));
     tracing::info!("Scraper starting");
-    let total = scrape::scrape_all(http).await?;
-    tracing::info!("Scrape finished: {} messages total", total);
+    let stats = scrape::scrape_all(http).await?;
+    tracing::info!(
+        "Scrape finished: {} channel(s)/thread(s) scanned, {} new message(s), {} skipped",
+        stats.channels_scanned,
+        stats.new_messages,
+        stats.skipped_channels.len()
+    );
     Ok(())
 }

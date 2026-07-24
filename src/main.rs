@@ -1,5 +1,6 @@
 mod ai;
 mod automod;
+mod channel_state;
 mod chat;
 mod commands;
 mod config;
@@ -17,13 +18,16 @@ use twilight_gateway::{
     CloseFrame, Config as GatewayConfig, Intents, Shard,
 };
 use twilight_http::Client;
+use twilight_model::channel::message::AllowedMentions;
 use twilight_model::id::Id;
 
 use crate::ai::{AiConfig, AiProcessor, AiProviderConfig};
 use crate::automod::AutoMod;
+use crate::channel_state::ChannelState;
 use crate::chat::{ChatClient, ChatRuntime};
 use crate::config::Config;
 use crate::voice::VoiceBridge;
+use discord_bot::scrape;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -39,8 +43,17 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    // Load configuration
-    let config = Config::load("config.toml").unwrap_or_default();
+    // Load configuration. A MISSING config.toml is fine (defaults). A config
+    // that is PRESENT but fails to parse is FATAL: silently booting defaults
+    // there disables chat and empties the admin list with no signal, leaving
+    // production quietly broken. Log the parse error and exit non-zero.
+    let config = match Config::load("config.toml") {
+        Ok(config) => config,
+        Err(e) => {
+            tracing::error!("Failed to load config.toml: {:#}", e);
+            return Err(e);
+        }
+    };
     if let Err(e) = config.validate() {
         tracing::error!("Configuration validation failed: {}", e);
         return Err(e);
@@ -73,11 +86,7 @@ async fn main() -> Result<()> {
     let chat_runtime: Option<Arc<ChatRuntime>> = match env::var("LLM_API_KEY") {
         Ok(key) => match ChatClient::new(&config.chat, key) {
             Ok(client) => {
-                let runtime = ChatRuntime::new(
-                    client,
-                    config.chat.enabled,
-                    config.chat.admin_user_ids.clone(),
-                );
+                let runtime = ChatRuntime::new(client, &config.chat);
                 tracing::info!(
                     "Chat runtime ready (initial = {}); LLM endpoint = {}; admins = {}",
                     if config.chat.enabled { "ON" } else { "OFF" },
@@ -123,8 +132,24 @@ async fn main() -> Result<()> {
     let pool = database::init_database(&database_url).await?;
     tracing::info!("Database initialized");
 
-    // Create HTTP client
-    let http = Arc::new(Client::new(token.clone()));
+    // Create HTTP client. The default AllowedMentions is EMPTY (pings nobody)
+    // so every send site — say, automod, voice — is ping-safe unless it
+    // explicitly overrides per-request, which only the chat reply path does.
+    let http = Arc::new(
+        Client::builder()
+            .token(token.clone())
+            .default_allowed_mentions(AllowedMentions::default())
+            .build(),
+    );
+
+    // Shared per-channel state: bot-chain loop guard + recent-authors map.
+    let channel_state = Arc::new(ChannelState::new());
+
+    // Minimum spacing between chat replies per channel (flood/DoS guard on the
+    // chat trigger; DMs aren't covered by automod). Threaded into the message
+    // handler so it applies to every trigger.
+    let chat_min_reply_gap =
+        std::time::Duration::from_secs(config.chat.min_seconds_between_replies);
 
     // Fetch bot user id so we can detect @-mentions in messages.
     let bot_user_id = http
@@ -226,6 +251,46 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Periodic history catch-up: ~30s after boot run a full scrape (backfill
+    // where needed + forward pass over every guild, channel and thread) so
+    // any gap from time spent offline heals, then repeat every
+    // `scrape.interval_hours`. Duplicate-safety against live gateway logging
+    // is handled inside channel_log: both paths funnel through the
+    // cursor-guarded append under one process-wide mutex.
+    if config.scrape.enabled {
+        let scrape_http = Arc::clone(&http);
+        let interval = tokio::time::Duration::from_secs(
+            config.scrape.interval_hours.saturating_mul(3600),
+        );
+        let mut scrape_shutdown_rx = shutdown_rx.clone();
+        tokio::spawn(async move {
+            let mut delay = tokio::time::Duration::from_secs(30);
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => {
+                        tracing::info!("History catch-up scrape starting");
+                        // scrape_all logs its own per-run summary (channels
+                        // scanned, new messages, skipped channels).
+                        if let Err(e) = scrape::scrape_all(Arc::clone(&scrape_http)).await {
+                            tracing::warn!("History catch-up scrape failed: {:#}", e);
+                        }
+                        delay = interval;
+                    }
+                    _ = scrape_shutdown_rx.changed() => {
+                        tracing::info!("Catch-up scrape task shutting down");
+                        break;
+                    }
+                }
+            }
+        });
+        tracing::info!(
+            "Catch-up scraper enabled (first run in ~30s, then every {}h)",
+            config.scrape.interval_hours
+        );
+    } else {
+        tracing::info!("Catch-up scraper disabled (scrape.enabled = false)");
+    }
+
     // Create shard event stream
     let mut stream = ShardEventStream::new(shards.iter_mut());
 
@@ -268,10 +333,22 @@ async fn main() -> Result<()> {
                 let ai = Arc::clone(&ai_processor);
                 let chat = chat_runtime.clone();
                 let voice = voice_bridge.clone();
+                let channel_state = Arc::clone(&channel_state);
 
                 tokio::spawn(async move {
-                    events::handle_event(event, http, pool, automod, ai, chat, voice, bot_user_id)
-                        .await;
+                    events::handle_event(
+                        event,
+                        http,
+                        pool,
+                        automod,
+                        ai,
+                        chat,
+                        voice,
+                        bot_user_id,
+                        channel_state,
+                        chat_min_reply_gap,
+                    )
+                    .await;
                 });
             }
             _ = event_shutdown_rx.changed() => {

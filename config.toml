@@ -27,10 +27,33 @@ default_delete_days = 1
 # `enabled` is the initial state of the runtime toggle — admins listed below
 # can flip it without restarting the bot via `!ai on`, `!ai off`, `!ai status`.
 enabled = true
-# URL of the LLM HTTP server on your desktop's Tailscale address.
-endpoint_url = "http://100.118.41.103:8088"
+# URL of the LLM HTTP server.
+endpoint_url = "http://127.0.0.1:8088"
 # Per-request HTTP timeout.
 request_timeout_secs = 30
 # Discord user IDs allowed to run `!ai on|off`. Leave empty to disable the
 # command entirely (status is still readable by anyone).
 admin_user_ids = [367334632515043329]
+# Reply when another bot DMs/@-mentions us (our own messages and webhooks are
+# always ignored). The chain guard below stops bot-to-bot ping-pong.
+respond_to_bots = true
+# Max consecutive bot-triggered replies per channel before we go quiet until
+# a human speaks.
+max_bot_chain = 3
+# Max characters of referenced-message text forwarded as reply context.
+reply_context_max_chars = 300
+# Minimum seconds between chat replies per channel (flood/DoS guard on the chat
+# trigger; DMs aren't covered by automod). A trigger arriving while a reply is
+# in flight, or sooner than this after the previous one, is skipped. Must be > 0.
+min_seconds_between_replies = 2
+
+[scrape]
+# In-process history catch-up. ~30 seconds after startup the bot walks every
+# guild it is in — channels, active threads, archived public threads, forum
+# posts — backfilling any missing history and paging forward past the stored
+# per-channel cursor, so messages that arrived while the bot was offline get
+# captured. Live gateway logging and the scraper dedupe against the same
+# cursors, so rows are never written twice.
+enabled = true
+# Hours between catch-up runs after the initial one.
+interval_hours = 24

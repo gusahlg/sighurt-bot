@@ -2,12 +2,14 @@ pub mod message;
 
 use crate::ai::AiProcessor;
 use crate::automod::AutoMod;
+use crate::channel_state::ChannelState;
 use crate::chat::ChatRuntime;
 use crate::commands;
 use crate::database::models::get_autorole;
 use crate::voice::VoiceBridge;
 use sqlx::SqlitePool;
 use std::sync::Arc;
+use std::time::Duration;
 use twilight_gateway::Event;
 use twilight_http::Client;
 use twilight_model::id::{Id, marker::UserMarker};
@@ -21,6 +23,8 @@ pub async fn handle_event(
     chat: Option<Arc<ChatRuntime>>,
     voice: Option<Arc<VoiceBridge>>,
     bot_user_id: Id<UserMarker>,
+    channel_state: Arc<ChannelState>,
+    chat_min_reply_gap: Duration,
 ) {
     match event {
         Event::Ready(ready) => {
@@ -59,6 +63,8 @@ pub async fn handle_event(
                     chat.as_deref(),
                     voice.as_ref(),
                     bot_user_id,
+                    &channel_state,
+                    chat_min_reply_gap,
                 )
                 .await
                 {

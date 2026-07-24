@@ -1,8 +1,42 @@
 # Discord Moderation Bot
 
-A Discord moderation bot written in Rust using the Twilight framework. Optimized for 24/7 operation on a Raspberry Pi (tested on Pi 4).
+A Discord moderation + AI chat bot written in Rust using the Twilight
+framework. Originally built for a Raspberry Pi; since 2026-07-24 it runs
+on the desktop next to the SuperSighurt LLM it chats through (see
+`docs/discord-ai-setup.md` in the `artificial-stupidity` repo for the
+full single-machine architecture).
 
 ## Features
+
+### AI Chat (SuperSighurt)
+- Answers **DMs and @-mentions** by calling the local LLM server
+  (`[chat] endpoint_url`, X-API-Key auth). `!ai on|off|status` toggles it
+  at runtime for the configured admins.
+- **Understands Discord replies**: when someone replies to a message
+  (the bot's or anyone's), the replied-to author + text are sent to the
+  LLM as context, and the bot's answer is posted as a real Discord reply.
+- **Talks to other bots** (`[chat] respond_to_bots`), with a
+  `max_bot_chain` loop guard (default 3 consecutive bot-triggered
+  replies per channel; any human message resets it) so two bots can't
+  ping-pong forever.
+- **Proper pings**: incoming `<@id>` mentions are converted to readable
+  `@name` for the model; `@name` in the model's output is resolved back
+  to a real `<@id>` ping. Everything else is ping-suppressed via a
+  strict `allowed_mentions` (the global default suppresses ALL pings —
+  no accidental `@everyone`).
+
+### Training-data capture
+- Logs **every message in every server** (humans and bots) to
+  `data/channels/<guild|dm>/<channel>.tsv` — message id, timestamp,
+  author, display name, **reply-to id**, content.
+- **Backfill + forward catch-up**: on startup (+30s) and every
+  `[scrape] interval_hours` (default 24), the bot backfills unseen
+  history and pages forward past its per-channel cursors, healing any
+  offline gap. Threads and forum posts are covered (active + archived
+  public threads). `cargo run --bin scraper` still works standalone.
+- The `artificial-stupidity` repo converts these TSVs into the LLM's
+  training corpus weekly (reply-chains stitched into clean dialogs,
+  mentions as learnable `@name` tokens).
 
 ### Moderation Commands
 | Command | Description | Permission |
@@ -241,6 +275,8 @@ cargo build --release --target aarch64-unknown-linux-gnu
 | `DISCORD_APPLICATION_ID` | Application ID from Developer Portal | Yes |
 | `DATABASE_URL` | SQLite database path (default: `sqlite:data/bot.db`) | No |
 | `RUST_LOG` | Log level: `trace`, `debug`, `info`, `warn`, `error` | No |
+| `LLM_API_KEY` | Shared secret for the SuperSighurt LLM server (enables chat) | For chat |
+| `ELEVENLABS_AGENT_ID` / `ELEVENLABS_API_KEY` | Voice bridge (optional) | For voice |
 
 ### Optional: config.toml
 
@@ -259,6 +295,19 @@ raid_interval = 10      # Interval in seconds
 [moderation]
 default_reason = "No reason provided"
 default_delete_days = 1
+
+[chat]
+enabled = true                    # boot state of the LLM chat (!ai toggles at runtime)
+endpoint_url = "http://127.0.0.1:8088"
+request_timeout_secs = 30
+admin_user_ids = [123456789012345678]
+respond_to_bots = true            # answer other bots' mentions/DMs
+max_bot_chain = 3                 # consecutive bot-triggered replies per channel before going quiet
+reply_context_max_chars = 300     # replied-to message excerpt sent to the LLM
+
+[scrape]
+enabled = true                    # in-process backfill + catch-up scraper
+interval_hours = 24               # cadence after the ~30s post-boot run
 ```
 
 ---

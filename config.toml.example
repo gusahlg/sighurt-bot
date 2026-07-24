@@ -34,3 +34,6 @@ request_timeout_secs = 30
 # Discord user IDs allowed to run `!ai on|off`. Leave empty to disable the
 # command entirely (status is still readable by anyone).
 admin_user_ids = []
+# Minimum seconds between chat replies per channel (flood/DoS guard on the chat
+# trigger; DMs aren't covered by automod). Must be > 0. Defaults to 2.
+min_seconds_between_replies = 2

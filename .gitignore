@@ -10,6 +10,12 @@
 /data/*.db-wal
 /data/*.db-shm
 
+# Scraped message transcripts (per-channel TSVs + cursors, and DMs).
+# These are private server/DM content and the training archive — they must
+# NOT be pushed to a public remote. Machine-local only.
+/data/channels/
+/data/.scrape.lock
+
 # IDE
 .idea/
 .vscode/
