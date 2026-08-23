@@ -7,12 +7,24 @@ use crate::chat::ChatRuntime;
 use crate::commands;
 use crate::database::models::get_autorole;
 use crate::voice::VoiceBridge;
+use discord_bot::channel_log;
 use sqlx::SqlitePool;
 use std::sync::Arc;
 use std::time::Duration;
 use twilight_gateway::Event;
 use twilight_http::Client;
+use twilight_model::channel::message::ReactionType;
 use twilight_model::id::{Id, marker::UserMarker};
+
+/// The loggable text form of a reaction emoji: the literal character(s) for
+/// unicode emoji, the bare name for custom guild emoji. Names stay bare (no
+/// `:colons:`) so downstream corpus cleaning doesn't rewrite them.
+fn emoji_text(emoji: &ReactionType) -> String {
+    match emoji {
+        ReactionType::Unicode { name } => name.clone(),
+        ReactionType::Custom { name, .. } => name.clone().unwrap_or_else(|| "custom".to_string()),
+    }
+}
 
 pub async fn handle_event(
     event: Event,
@@ -60,7 +72,7 @@ pub async fn handle_event(
                     &http,
                     &automod,
                     &ai,
-                    chat.as_deref(),
+                    chat.as_ref(),
                     voice.as_ref(),
                     bot_user_id,
                     &channel_state,
@@ -98,7 +110,9 @@ pub async fn handle_event(
                             .await
                         {
                             tracing::error!(
-                                "Failed to add autorole {} to user {}: {}",
+                                "Failed to add autorole {} to user {}: {} \
+                                 (403 = the bot's highest role must sit above \
+                                 the autorole and have Manage Roles)",
                                 role_id,
                                 member.user.id,
                                 e
@@ -118,6 +132,37 @@ pub async fn handle_event(
                     }
                 }
             });
+        }
+        // Reactions feed the training corpus: humans reacting to messages is
+        // exactly the signal that teaches Sig when (and how) to react. The
+        // bot's own reactions are skipped — same self-imitation rule as chat.
+        Event::ReactionAdd(reaction) => {
+            if reaction.user_id != bot_user_id {
+                if let Err(e) = channel_log::append_reaction(
+                    reaction.guild_id,
+                    reaction.channel_id.get(),
+                    reaction.message_id.get(),
+                    reaction.user_id.get(),
+                    &emoji_text(&reaction.emoji),
+                    1,
+                ) {
+                    tracing::warn!("reaction log append failed: {}", e);
+                }
+            }
+        }
+        Event::ReactionRemove(reaction) => {
+            if reaction.user_id != bot_user_id {
+                if let Err(e) = channel_log::append_reaction(
+                    reaction.guild_id,
+                    reaction.channel_id.get(),
+                    reaction.message_id.get(),
+                    reaction.user_id.get(),
+                    &emoji_text(&reaction.emoji),
+                    -1,
+                ) {
+                    tracing::warn!("reaction log append failed: {}", e);
+                }
+            }
         }
         Event::GatewayReconnect => {
             tracing::info!("Gateway reconnecting...");

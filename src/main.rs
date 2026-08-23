@@ -7,11 +7,13 @@ mod config;
 mod database;
 mod events;
 mod voice;
+mod web_search;
 
 use anyhow::Result;
 use futures_util::StreamExt;
 use std::env;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::watch;
 use twilight_gateway::{
     stream::{self, ShardEventStream},
@@ -27,7 +29,17 @@ use crate::channel_state::ChannelState;
 use crate::chat::{ChatClient, ChatRuntime};
 use crate::config::Config;
 use crate::voice::VoiceBridge;
+use crate::web_search::WebSearchClient;
 use discord_bot::scrape;
+
+/// How long the merged shard stream may go silent before we assume the
+/// gateway is wedged. A healthy connection carries at least a heartbeat ACK
+/// every ~41s, so minutes of total silence can only mean a dead shard.
+const GATEWAY_STALL_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Cap on closing a shard during shutdown — the close frame goes over the
+/// same (possibly dead) socket that made us shut down in the first place.
+const SHARD_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -86,12 +98,23 @@ async fn main() -> Result<()> {
     let chat_runtime: Option<Arc<ChatRuntime>> = match env::var("LLM_API_KEY") {
         Ok(key) => match ChatClient::new(&config.chat, key) {
             Ok(client) => {
-                let runtime = ChatRuntime::new(client, &config.chat);
+                let search = match WebSearchClient::new(
+                    &config.chat,
+                    env::var("BRAVE_SEARCH_API_KEY").ok(),
+                ) {
+                    Ok(search) => search,
+                    Err(e) => {
+                        tracing::error!("Failed to build web-search client: {}; live search disabled", e);
+                        None
+                    }
+                };
+                let runtime = ChatRuntime::new(client, &config.chat, search);
                 tracing::info!(
-                    "Chat runtime ready (initial = {}); LLM endpoint = {}; admins = {}",
+                    "Chat runtime ready (initial = {}); LLM endpoint = {}; admins = {}; web search = {}",
                     if config.chat.enabled { "ON" } else { "OFF" },
                     config.chat.endpoint_url,
                     config.chat.admin_user_ids.len(),
+                    if config.chat.web_search_enabled { "ON" } else { "OFF" },
                 );
                 Some(runtime)
             }
@@ -148,8 +171,7 @@ async fn main() -> Result<()> {
     // Minimum spacing between chat replies per channel (flood/DoS guard on the
     // chat trigger; DMs aren't covered by automod). Threaded into the message
     // handler so it applies to every trigger.
-    let chat_min_reply_gap =
-        std::time::Duration::from_secs(config.chat.min_seconds_between_replies);
+    let chat_min_reply_gap = Duration::from_secs(config.chat.min_seconds_between_replies);
 
     // Fetch bot user id so we can detect @-mentions in messages.
     let bot_user_id = http
@@ -177,7 +199,10 @@ async fn main() -> Result<()> {
         | Intents::GUILD_MESSAGES
         | Intents::MESSAGE_CONTENT
         | Intents::DIRECT_MESSAGES
-        | Intents::GUILD_VOICE_STATES;
+        | Intents::GUILD_VOICE_STATES
+        // Reactions feed the training corpus and teach Sig when to react.
+        | Intents::GUILD_MESSAGE_REACTIONS
+        | Intents::DIRECT_MESSAGE_REACTIONS;
 
     // Create gateway config
     let gateway_config = GatewayConfig::new(token.clone(), intents);
@@ -294,24 +319,63 @@ async fn main() -> Result<()> {
     // Create shard event stream
     let mut stream = ShardEventStream::new(shards.iter_mut());
 
+    // Tell systemd we're up (no-op outside systemd), and keep its watchdog
+    // fed from a dedicated task. If the whole runtime ever deadlocks, the
+    // pings stop and systemd kills + restarts us.
+    let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]);
+    let mut watchdog_usec = 0;
+    if sd_notify::watchdog_enabled(false, &mut watchdog_usec) {
+        let interval = Duration::from_micros(watchdog_usec / 2);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Watchdog]);
+            }
+        });
+        tracing::info!("systemd watchdog enabled ({}s)", watchdog_usec / 2_000_000);
+    }
+
     tracing::info!("Bot is starting...");
 
-    // Main event loop with shutdown handling
+    // Main event loop with shutdown handling.
+    //
+    // The timeout around `stream.next()` is a stall watchdog. twilight
+    // 0.15's zombied-connection recovery sends a close frame and then waits
+    // for the peer to hang up, disabling its own heartbeat timer in the
+    // process (`Shard::disconnect`). If that close frame dies on a
+    // dead-but-ESTABLISHED TCP connection, no timer is left to ever wake
+    // the shard and the stream goes silent forever while the process looks
+    // healthy (observed 2026-08-02: "connection is failed or zombied", then
+    // 24h of deafness). Any abnormal end here must exit non-zero so systemd
+    // restarts us into a clean identify.
     let mut event_shutdown_rx = shutdown_rx.clone();
+    let mut abnormal_exit: Option<String> = None;
     loop {
         tokio::select! {
-            next = stream.next() => {
+            next = tokio::time::timeout(GATEWAY_STALL_TIMEOUT, stream.next()) => {
                 let event = match next {
-                    Some((_, Ok(event))) => event,
-                    Some((_, Err(e))) => {
-                        tracing::error!("Shard error: {}", e);
+                    Err(_) => {
+                        abnormal_exit = Some(format!(
+                            "gateway silent for {}s (zombied connection?)",
+                            GATEWAY_STALL_TIMEOUT.as_secs()
+                        ));
+                        break;
+                    }
+                    Ok(Some((_, Ok(event)))) => event,
+                    Ok(Some((_, Err(e)))) => {
+                        // Display is terse ("websocket connection error");
+                        // the useful detail lives in the error's source.
+                        tracing::error!("Shard error: {e} ({e:?})");
                         if e.is_fatal() {
-                            tracing::error!("Fatal shard error, shutting down");
+                            abnormal_exit = Some(format!("fatal shard error: {e}"));
                             break;
                         }
                         continue;
                     }
-                    None => break,
+                    Ok(None) => {
+                        abnormal_exit = Some("shard event stream ended".to_string());
+                        break;
+                    }
                 };
 
                 // Feed Songbird every gateway event so it sees voice state /
@@ -360,18 +424,28 @@ async fn main() -> Result<()> {
 
     // Graceful shutdown: drop the stream to release the mutable borrow on shards
     drop(stream);
+    let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Stopping]);
 
-    // Close all shards cleanly
+    // Close all shards cleanly. Time-boxed: when we're here because the
+    // connection wedged, this close frame would go into the same dead socket.
     tracing::info!("Closing {} shard(s)...", shard_count);
     for shard in &mut shards {
-        if let Err(e) = shard.close(CloseFrame::NORMAL).await {
-            tracing::warn!("Error closing shard: {}", e);
+        match tokio::time::timeout(SHARD_CLOSE_TIMEOUT, shard.close(CloseFrame::NORMAL)).await {
+            Ok(Err(e)) => tracing::warn!("Error closing shard: {}", e),
+            Err(_) => tracing::warn!("Timed out closing shard"),
+            Ok(Ok(_)) => {}
         }
     }
 
     // Close the database pool
     tracing::info!("Closing database pool...");
     pool.close().await;
+
+    if let Some(reason) = abnormal_exit {
+        // Exit non-zero so systemd's Restart= policy brings us back up.
+        tracing::error!("Exiting for restart: {reason}");
+        return Err(anyhow::anyhow!(reason));
+    }
 
     tracing::info!("Bot shut down cleanly");
     Ok(())

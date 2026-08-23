@@ -37,6 +37,14 @@ struct ChannelEntry {
     /// When the last chat trigger was admitted for this channel. Used to
     /// enforce a minimum spacing between replies.
     last_chat_trigger: Option<Instant>,
+    /// Human messages seen since the bot last spoke in this channel. Drives
+    /// unprompted replies ("jump in every ~N messages").
+    messages_since_bot_reply: u32,
+    /// The jittered message count at which the next unprompted reply fires.
+    /// 0 = not yet drawn for the current cycle.
+    unprompted_target: u32,
+    /// When the bot last added a reaction in this channel (spam brake).
+    last_reaction: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -63,6 +71,7 @@ impl ChannelState {
         let entry = channels.entry(channel_id).or_default();
         if !author_is_bot {
             entry.consecutive_bot_replies = 0;
+            entry.messages_since_bot_reply = entry.messages_since_bot_reply.saturating_add(1);
         }
         if let Some(pos) = entry
             .recent_authors
@@ -147,6 +156,61 @@ impl ChannelState {
         if let Some(entry) = self.channels.lock().get_mut(&channel_id) {
             entry.chat_in_flight = false;
         }
+    }
+
+    /// Atomically claim an unprompted-reply trigger. Fires once the channel
+    /// has seen a jittered target of `base ± base/4` human messages since the
+    /// bot last spoke, then resets the counter and draws a fresh target so
+    /// the cadence stays organic instead of metronomic. `entropy` is any
+    /// varying value (message snowflake timestamp bits work well) — this only
+    /// needs jitter, not cryptographic randomness.
+    pub fn try_claim_unprompted(
+        &self,
+        channel_id: Id<ChannelMarker>,
+        base: u32,
+        entropy: u64,
+    ) -> bool {
+        if base == 0 {
+            return false;
+        }
+        let mut channels = self.channels.lock();
+        let entry = channels.entry(channel_id).or_default();
+        if entry.unprompted_target == 0 {
+            let spread = (base / 2).max(1);
+            entry.unprompted_target = base - base / 4 + (entropy % spread as u64) as u32;
+        }
+        if entry.messages_since_bot_reply >= entry.unprompted_target {
+            entry.messages_since_bot_reply = 0;
+            entry.unprompted_target = 0;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Note that the bot delivered a chat reply in this channel: the
+    /// unprompted counter starts over (any bot message counts as the bot
+    /// having spoken, prompted or not).
+    pub fn note_bot_reply(&self, channel_id: Id<ChannelMarker>) {
+        let mut channels = self.channels.lock();
+        let entry = channels.entry(channel_id).or_default();
+        entry.messages_since_bot_reply = 0;
+        entry.unprompted_target = 0;
+    }
+
+    /// Claim a reaction opportunity if the per-channel cooldown has elapsed.
+    /// Stamps the cooldown immediately so concurrent messages can't both fire.
+    pub fn try_claim_reaction(&self, channel_id: Id<ChannelMarker>, min_gap: Duration) -> bool {
+        let now = Instant::now();
+        let mut channels = self.channels.lock();
+        let entry = channels.entry(channel_id).or_default();
+        if let Some(last) = entry.last_reaction {
+            if now.duration_since(last) < min_gap {
+                return false;
+            }
+        }
+        entry.last_reaction = Some(now);
+        true
     }
 
     /// Look up a recent author's display name by id.
@@ -286,6 +350,50 @@ mod tests {
         state.record_message(CH, Id::new(5), "Gurra", false);
         assert_eq!(state.display_name(CH, Id::new(5)).as_deref(), Some("Gurra"));
         assert_eq!(state.find_by_name(CH, "GURRA"), Some(Id::new(5)));
+    }
+
+    #[test]
+    fn unprompted_fires_in_jitter_window_and_resets() {
+        let state = ChannelState::new();
+        let base = 30;
+        // Never before base - base/4 human messages, always by base + base/4.
+        let mut fired_at = None;
+        for n in 1..=45u32 {
+            state.record_message(CH, Id::new(2), "human", false);
+            if state.try_claim_unprompted(CH, base, 7) {
+                fired_at = Some(n);
+                break;
+            }
+        }
+        let n = fired_at.expect("unprompted reply never fired");
+        assert!((23..=38).contains(&n), "fired at {n}, outside jitter window");
+        // Counter reset: the very next message cannot fire again.
+        state.record_message(CH, Id::new(2), "human", false);
+        assert!(!state.try_claim_unprompted(CH, base, 7));
+    }
+
+    #[test]
+    fn unprompted_disabled_with_zero_base_and_reset_by_bot_reply() {
+        let state = ChannelState::new();
+        for _ in 0..100 {
+            state.record_message(CH, Id::new(2), "human", false);
+        }
+        assert!(!state.try_claim_unprompted(CH, 0, 1));
+        // A delivered bot reply resets the accumulated count.
+        state.note_bot_reply(CH);
+        state.record_message(CH, Id::new(2), "human", false);
+        assert!(!state.try_claim_unprompted(CH, 30, 1));
+    }
+
+    #[test]
+    fn reaction_claim_respects_cooldown() {
+        let state = ChannelState::new();
+        assert!(state.try_claim_reaction(CH, Duration::from_secs(3600)));
+        assert!(!state.try_claim_reaction(CH, Duration::from_secs(3600)));
+        // Independent channel, independent cooldown.
+        assert!(state.try_claim_reaction(Id::new(200), Duration::from_secs(3600)));
+        // Zero gap always admits.
+        assert!(state.try_claim_reaction(CH, Duration::ZERO));
     }
 
     #[test]

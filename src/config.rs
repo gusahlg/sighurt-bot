@@ -82,12 +82,40 @@ pub struct ChatConfig {
     /// reply context when the trigger is a Discord reply.
     #[serde(default = "default_reply_context_max_chars")]
     pub reply_context_max_chars: usize,
+    /// Number of recent ambient channel messages sent to the LLM before the
+    /// trigger. Discord returns at most 100; we intentionally cap this much
+    /// lower so one mention cannot create an unbounded prompt.
+    #[serde(default = "default_recent_context_messages")]
+    pub recent_context_messages: usize,
+    /// Per-message character cap for ambient context.
+    #[serde(default = "default_context_message_max_chars")]
+    pub context_message_max_chars: usize,
     /// Minimum seconds between chat replies per channel. A trigger arriving
     /// while a reply is in flight, or sooner than this after the previous
     /// trigger, is skipped. Applies to DMs (which automod doesn't cover) as a
     /// flood guard, and everywhere else too.
     #[serde(default = "default_min_seconds_between_replies")]
     pub min_seconds_between_replies: u64,
+    /// Enable explicit live retrieval for `!search` and natural-language
+    /// "search the web" requests.
+    #[serde(default = "default_true")]
+    pub web_search_enabled: bool,
+    /// Maximum untrusted result snippets admitted to one LLM prompt.
+    #[serde(default = "default_web_search_max_results")]
+    pub web_search_max_results: usize,
+    /// Independent timeout for the external search provider.
+    #[serde(default = "default_web_search_timeout_secs")]
+    pub web_search_timeout_secs: u64,
+    /// Reply unprompted roughly every N human messages per channel (with
+    /// jitter), so Sig joins conversations instead of only answering pings.
+    /// 0 disables unprompted replies. DMs are unaffected (always answered).
+    #[serde(default = "default_unprompted_reply_every")]
+    pub unprompted_reply_every: u32,
+    /// Probability (0.0..=1.0) that a new human message is offered to the LLM
+    /// as a reaction opportunity — the model then picks one emoji or passes.
+    /// 0 disables bot reactions entirely.
+    #[serde(default = "default_react_probability")]
+    pub react_probability: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -151,7 +179,7 @@ fn default_chat_endpoint() -> String {
 }
 
 fn default_chat_timeout() -> u64 {
-    30
+    90
 }
 
 fn default_max_bot_chain() -> u32 {
@@ -162,8 +190,32 @@ fn default_reply_context_max_chars() -> usize {
     300
 }
 
+fn default_recent_context_messages() -> usize {
+    12
+}
+
+fn default_context_message_max_chars() -> usize {
+    400
+}
+
 fn default_min_seconds_between_replies() -> u64 {
     2
+}
+
+fn default_web_search_max_results() -> usize {
+    4
+}
+
+fn default_web_search_timeout_secs() -> u64 {
+    12
+}
+
+fn default_unprompted_reply_every() -> u32 {
+    30
+}
+
+fn default_react_probability() -> f64 {
+    0.2
 }
 
 impl Default for AutomodConfig {
@@ -205,12 +257,19 @@ impl Default for ChatConfig {
         Self {
             enabled: false,
             endpoint_url: default_chat_endpoint(),
-            request_timeout_secs: 30,
+            request_timeout_secs: default_chat_timeout(),
             admin_user_ids: Vec::new(),
             respond_to_bots: true,
             max_bot_chain: 3,
             reply_context_max_chars: 300,
+            recent_context_messages: default_recent_context_messages(),
+            context_message_max_chars: default_context_message_max_chars(),
             min_seconds_between_replies: 2,
+            web_search_enabled: true,
+            web_search_max_results: default_web_search_max_results(),
+            web_search_timeout_secs: default_web_search_timeout_secs(),
+            unprompted_reply_every: default_unprompted_reply_every(),
+            react_probability: default_react_probability(),
         }
     }
 }
@@ -310,6 +369,21 @@ impl Config {
         if self.chat.min_seconds_between_replies == 0 {
             anyhow::bail!("chat.min_seconds_between_replies must be > 0");
         }
+        if self.chat.recent_context_messages > 50 {
+            anyhow::bail!("chat.recent_context_messages must be <= 50");
+        }
+        if self.chat.context_message_max_chars == 0 || self.chat.context_message_max_chars > 2_000 {
+            anyhow::bail!("chat.context_message_max_chars must be in 1..=2000");
+        }
+        if self.chat.web_search_max_results == 0 || self.chat.web_search_max_results > 8 {
+            anyhow::bail!("chat.web_search_max_results must be in 1..=8");
+        }
+        if self.chat.web_search_timeout_secs == 0 || self.chat.web_search_timeout_secs > 60 {
+            anyhow::bail!("chat.web_search_timeout_secs must be in 1..=60");
+        }
+        if !(0.0..=1.0).contains(&self.chat.react_probability) {
+            anyhow::bail!("chat.react_probability must be in 0.0..=1.0");
+        }
 
         // Validate scrape settings
         if self.scrape.enabled && self.scrape.interval_hours == 0 {
@@ -357,11 +431,16 @@ mod tests {
         let config = ChatConfig::default();
         assert!(!config.enabled);
         assert_eq!(config.endpoint_url, "http://127.0.0.1:8088");
-        assert_eq!(config.request_timeout_secs, 30);
+        assert_eq!(config.request_timeout_secs, 90);
         assert!(config.respond_to_bots);
         assert_eq!(config.max_bot_chain, 3);
         assert_eq!(config.reply_context_max_chars, 300);
+        assert_eq!(config.recent_context_messages, 12);
+        assert_eq!(config.context_message_max_chars, 400);
         assert_eq!(config.min_seconds_between_replies, 2);
+        assert!(config.web_search_enabled);
+        assert_eq!(config.web_search_max_results, 4);
+        assert_eq!(config.web_search_timeout_secs, 12);
     }
 
     #[test]
@@ -412,6 +491,8 @@ mod tests {
         assert!(config.chat.respond_to_bots);
         assert_eq!(config.chat.max_bot_chain, 3);
         assert_eq!(config.chat.reply_context_max_chars, 300);
+        assert!(config.chat.web_search_enabled);
+        assert_eq!(config.chat.web_search_max_results, 4);
     }
 
     #[test]
@@ -504,11 +585,24 @@ mod tests {
     }
 
     #[test]
+    fn test_config_validate_web_search_bounds() {
+        let mut config = Config::default();
+        config.chat.web_search_max_results = 0;
+        assert!(config.validate().is_err());
+        config.chat.web_search_max_results = 4;
+        config.chat.web_search_timeout_secs = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
     fn test_config_load_parse_error_is_fatal() {
         // Write a syntactically broken TOML to a temp file; load must return an
         // error rather than silently falling back to defaults.
         let mut path = std::env::temp_dir();
-        path.push(format!("discord_bot_bad_config_{}.toml", std::process::id()));
+        path.push(format!(
+            "discord_bot_bad_config_{}.toml",
+            std::process::id()
+        ));
         std::fs::write(&path, "this is = = not valid toml [[[").unwrap();
         let result = Config::load(&path);
         let _ = std::fs::remove_file(&path);
@@ -519,7 +613,10 @@ mod tests {
     fn test_config_load_type_error_is_fatal() {
         // Wrong type for a field is a parse error too (must not boot defaults).
         let mut path = std::env::temp_dir();
-        path.push(format!("discord_bot_type_config_{}.toml", std::process::id()));
+        path.push(format!(
+            "discord_bot_type_config_{}.toml",
+            std::process::id()
+        ));
         std::fs::write(&path, "[chat]\nmax_bot_chain = \"lots\"\n").unwrap();
         let result = Config::load(&path);
         let _ = std::fs::remove_file(&path);

@@ -30,7 +30,7 @@ enabled = true
 # URL of the LLM HTTP server.
 endpoint_url = "http://127.0.0.1:8088"
 # Per-request HTTP timeout.
-request_timeout_secs = 30
+request_timeout_secs = 90
 # Discord user IDs allowed to run `!ai on|off`. Leave empty to disable the
 # command entirely (status is still readable by anyone).
 admin_user_ids = [367334632515043329]
@@ -42,10 +42,18 @@ respond_to_bots = true
 max_bot_chain = 3
 # Max characters of referenced-message text forwarded as reply context.
 reply_context_max_chars = 300
+# Ambient channel messages sent oldest-first with stable message/reply IDs.
+recent_context_messages = 12
+context_message_max_chars = 400
 # Minimum seconds between chat replies per channel (flood/DoS guard on the chat
 # trigger; DMs aren't covered by automod). A trigger arriving while a reply is
 # in flight, or sooner than this after the previous one, is skipped. Must be > 0.
 min_seconds_between_replies = 2
+# Explicit live web retrieval. BRAVE_SEARCH_API_KEY is optional; production
+# currently uses the zero-secret DuckDuckGo/Wikimedia fallback.
+web_search_enabled = true
+web_search_max_results = 4
+web_search_timeout_secs = 12
 
 [scrape]
 # In-process history catch-up. ~30 seconds after startup the bot walks every

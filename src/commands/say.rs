@@ -8,7 +8,6 @@ use twilight_model::{
         application_command::{CommandData, CommandOptionValue},
         Interaction,
     },
-    guild::Permissions,
     http::interaction::InteractionResponse,
     id::Id,
 };
@@ -16,9 +15,11 @@ use twilight_model::{
 pub fn create_command() -> Command {
     Command {
         application_id: None,
-        default_member_permissions: Some(Permissions::MANAGE_MESSAGES),
+        // Open to everyone: the posted message always carries the invoker's
+        // name, so there is no impersonation to guard against.
+        default_member_permissions: None,
         dm_permission: Some(false),
-        description: "Make the bot say something".to_string(),
+        description: "Make the bot repeat a message, attributed to you".to_string(),
         description_localizations: None,
         guild_id: None,
         id: None,
@@ -72,8 +73,24 @@ pub async fn handle(
         return Ok(create_response("Please provide a message"));
     };
 
+    // Always attribute the invoker: "<who used the command>: <the message>".
+    // Guild nickname wins, then global display name, then the username — the
+    // point is that nobody can put words in the bot's own mouth anonymously.
+    let invoker = interaction
+        .member
+        .as_ref()
+        .and_then(|member| member.nick.clone())
+        .or_else(|| {
+            interaction
+                .author()
+                .and_then(|user| user.global_name.clone())
+        })
+        .or_else(|| interaction.author().map(|user| user.name.clone()))
+        .unwrap_or_else(|| "someone".to_string());
+    let attributed = format!("{}: {}", invoker, message);
+
     // Send the message (single call - no double-send)
-    match http.create_message(channel.id).content(&message) {
+    match http.create_message(channel.id).content(&attributed) {
         Ok(request) => {
             if let Err(e) = request.await {
                 return Ok(create_response(&format!("Failed to send message: {}", e)));

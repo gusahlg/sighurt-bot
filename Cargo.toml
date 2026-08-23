@@ -60,6 +60,9 @@ base64 = "0.22"
 # JSON for hand-rolled ElevenLabs WS messages.
 serde_json = "1"
 
+# systemd readiness + watchdog pings (no-op outside systemd).
+sd-notify = "0.4"
+
 # AI mode support (feature-gated for optional build)
 [features]
 default = []

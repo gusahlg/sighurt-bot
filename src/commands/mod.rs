@@ -19,11 +19,19 @@ use twilight_model::{
     id::{marker::ApplicationMarker, Id},
 };
 
-pub async fn register_commands(
-    http: &Client,
-    application_id: Id<ApplicationMarker>,
-) -> Result<()> {
-    let commands = vec![
+pub async fn register_commands(http: &Client, application_id: Id<ApplicationMarker>) -> Result<()> {
+    let commands = command_definitions();
+
+    http.interaction(application_id)
+        .set_global_commands(&commands)
+        .await?;
+
+    tracing::info!("Registered {} slash commands", commands.len());
+    Ok(())
+}
+
+fn command_definitions() -> Vec<twilight_model::application::command::Command> {
+    vec![
         ban::create_command(),
         kick::create_command(),
         mute::create_command(),
@@ -32,16 +40,11 @@ pub async fn register_commands(
         ping::create_command(),
         userinfo::create_command(),
         serverinfo::create_command(),
+        // /say posts "<invoker>: <message>" — attribution makes it safe to
+        // leave open to everyone.
         say::create_command(),
         autorole::create_command(),
-    ];
-
-    http.interaction(application_id)
-        .set_global_commands(&commands)
-        .await?;
-
-    tracing::info!("Registered {} slash commands", commands.len());
-    Ok(())
+    ]
 }
 
 pub async fn handle_interaction(
@@ -97,5 +100,20 @@ pub fn create_public_response(content: &str) -> InteractionResponse {
             content: Some(content.to_string()),
             ..Default::default()
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn say_is_registered_with_attribution() {
+        let names = command_definitions()
+            .into_iter()
+            .map(|command| command.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names.len(), 10);
+        assert!(names.iter().any(|name| name == "say"));
     }
 }

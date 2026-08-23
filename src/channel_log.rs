@@ -156,6 +156,10 @@ fn cursor_path(root: &Path, bucket: &str, channel_id: u64) -> PathBuf {
     root.join(bucket).join(format!("{}.cursor", channel_id))
 }
 
+fn reactions_path(root: &Path, bucket: &str, channel_id: u64) -> PathBuf {
+    root.join(bucket).join(format!("{}.reactions.tsv", channel_id))
+}
+
 fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
@@ -449,6 +453,53 @@ pub fn append_live(message: &Message) -> Result<()> {
     }
     let bucket = bucket_for_guild(message.guild_id);
     append_new(message, &bucket).map(|_| ())
+}
+
+/// Append one reaction event row to the sidecar `<channel_id>.reactions.tsv`.
+///
+/// Columns: `message_id \t timestamp \t user_id \t emoji \t delta`, where
+/// `delta` is +1 (added) or -1 (removed) for live gateway events, or a
+/// positive aggregate count with `user_id = 0` for scraper-summarized rows.
+/// The training converter aggregates net counts per (message, emoji), so
+/// add/remove churn cancels out naturally. Append-only, same escaping and
+/// process-wide lock as the message log.
+pub fn append_reaction(
+    guild_id: Option<Id<GuildMarker>>,
+    channel_id: u64,
+    message_id: u64,
+    user_id: u64,
+    emoji: &str,
+    delta: i64,
+) -> Result<()> {
+    let emoji = emoji.trim();
+    if emoji.is_empty() {
+        return Ok(());
+    }
+    let bucket = bucket_for_guild(guild_id);
+    let _guard = write_lock().lock();
+    let path = reactions_path(data_root(), &bucket, channel_id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create dir {:?}", parent))?;
+    }
+    let now = OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| OffsetDateTime::now_utc().unix_timestamp().to_string());
+    let line = format!(
+        "{}\t{}\t{}\t{}\t{}\n",
+        message_id,
+        now,
+        user_id,
+        escape(emoji),
+        delta,
+    );
+    let mut f = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("open {:?}", path))?;
+    f.write_all(line.as_bytes())
+        .with_context(|| format!("write {:?}", path))?;
+    Ok(())
 }
 
 /// Read the full cursor at the default data root; see [`read_cursor_at`].

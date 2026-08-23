@@ -1,11 +1,12 @@
 //! HTTP client that calls the SuperSighurt LLM server living on the desktop.
 
 use crate::config::ChatConfig;
-use anyhow::{Context, Result, anyhow, bail};
+use crate::web_search::{WebSearchClient, WebSearchContext};
+use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
 use std::collections::HashSet;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Wraps a `ChatClient` with a runtime on/off toggle and an admin allowlist.
@@ -21,10 +22,19 @@ pub struct ChatRuntime {
     respond_to_bots: bool,
     max_bot_chain: u32,
     reply_context_max_chars: usize,
+    recent_context_messages: usize,
+    context_message_max_chars: usize,
+    unprompted_reply_every: u32,
+    react_probability: f64,
+    web_search: Option<WebSearchClient>,
 }
 
 impl ChatRuntime {
-    pub fn new(client: ChatClient, cfg: &ChatConfig) -> Arc<Self> {
+    pub fn new(
+        client: ChatClient,
+        cfg: &ChatConfig,
+        web_search: Option<WebSearchClient>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             client,
             enabled: AtomicBool::new(cfg.enabled),
@@ -32,6 +42,11 @@ impl ChatRuntime {
             respond_to_bots: cfg.respond_to_bots,
             max_bot_chain: cfg.max_bot_chain,
             reply_context_max_chars: cfg.reply_context_max_chars,
+            recent_context_messages: cfg.recent_context_messages,
+            context_message_max_chars: cfg.context_message_max_chars,
+            unprompted_reply_every: cfg.unprompted_reply_every,
+            react_probability: cfg.react_probability,
+            web_search,
         })
     }
 
@@ -64,8 +79,28 @@ impl ChatRuntime {
         self.reply_context_max_chars
     }
 
+    pub fn recent_context_messages(&self) -> usize {
+        self.recent_context_messages
+    }
+
+    pub fn context_message_max_chars(&self) -> usize {
+        self.context_message_max_chars
+    }
+
+    pub fn unprompted_reply_every(&self) -> u32 {
+        self.unprompted_reply_every
+    }
+
+    pub fn react_probability(&self) -> f64 {
+        self.react_probability
+    }
+
     pub fn client(&self) -> &ChatClient {
         &self.client
+    }
+
+    pub fn web_search(&self) -> Option<&WebSearchClient> {
+        self.web_search.as_ref()
     }
 }
 
@@ -79,12 +114,36 @@ pub struct ChatRequest {
     pub user_id: u64,
     pub user_is_bot: bool,
     pub input: String,
+    /// Recent ambient channel messages, oldest first. This is what lets the
+    /// model understand a mention in the context of the conversation that
+    /// preceded it instead of seeing the trigger in isolation.
+    pub context: Vec<ChatContextMessage>,
     pub reply_to: Option<ChatReplyTo>,
+    /// Present only for an explicit live-search request. Empty results mean a
+    /// real retrieval was attempted but returned no usable evidence.
+    pub web_search: Option<WebSearchContext>,
+    /// Reaction mode: the server renders "React as SuperSighurt with one
+    /// emoji, or say pass." instead of the normal reply instruction and caps
+    /// generation short. The reply is an emoji (or "pass"), not a message.
+    pub react: bool,
+}
+
+/// One ambient channel message supplied as structured context.
+#[derive(Debug, Clone)]
+pub struct ChatContextMessage {
+    pub message_id: u64,
+    pub user: String,
+    pub user_id: u64,
+    pub text: String,
+    pub is_bot: bool,
+    pub is_self: bool,
+    pub reply_to_message_id: Option<u64>,
 }
 
 /// Context about the message the trigger replied to.
 #[derive(Debug, Clone)]
 pub struct ChatReplyTo {
+    pub message_id: u64,
     pub user: String,
     pub user_id: u64,
     pub text: String,
@@ -155,9 +214,30 @@ fn wire_body(request: &ChatRequest) -> String {
         "user_id": request.user_id.to_string(),
         "user_is_bot": bool_str(request.user_is_bot),
         "input": request.input,
+        "context": request.context.iter().map(|message| {
+            let mut value = serde_json::json!({
+                "message_id": message.message_id.to_string(),
+                "user": message.user,
+                "user_id": message.user_id.to_string(),
+                "text": message.text,
+                "is_bot": bool_str(message.is_bot),
+                "is_self": bool_str(message.is_self),
+            });
+            if let Some(reply_id) = message.reply_to_message_id {
+                value.as_object_mut().expect("context entry is an object").insert(
+                    "reply_to_message_id".to_string(),
+                    reply_id.to_string().into(),
+                );
+            }
+            value
+        }).collect::<Vec<_>>(),
     });
     if let Some(reply_to) = &request.reply_to {
         let obj = body.as_object_mut().expect("wire body is a JSON object");
+        obj.insert(
+            "reply_to_message_id".to_string(),
+            reply_to.message_id.to_string().into(),
+        );
         obj.insert("reply_to_user".to_string(), reply_to.user.clone().into());
         obj.insert(
             "reply_to_user_id".to_string(),
@@ -173,11 +253,38 @@ fn wire_body(request: &ChatRequest) -> String {
             bool_str(reply_to.is_self).into(),
         );
     }
+    if request.react {
+        let obj = body.as_object_mut().expect("wire body is a JSON object");
+        obj.insert("mode".to_string(), "react".into());
+    }
+    if let Some(search) = &request.web_search {
+        let obj = body.as_object_mut().expect("wire body is a JSON object");
+        obj.insert("web_search_query".to_string(), search.query.clone().into());
+        obj.insert(
+            "web_results".to_string(),
+            search
+                .results
+                .iter()
+                .map(|result| {
+                    serde_json::json!({
+                        "title": result.title,
+                        "url": result.url,
+                        "snippet": result.snippet,
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into(),
+        );
+    }
     body.to_string()
 }
 
 fn bool_str(v: bool) -> &'static str {
-    if v { "true" } else { "false" }
+    if v {
+        "true"
+    } else {
+        "false"
+    }
 }
 
 #[cfg(test)]
@@ -191,7 +298,10 @@ mod tests {
             user_id: 7,
             user_is_bot: false,
             input: "hej \"du\" \u{1f600}".to_string(),
+            context: Vec::new(),
             reply_to: None,
+            web_search: None,
+            react: false,
         }
     }
 
@@ -203,30 +313,65 @@ mod tests {
         assert_eq!(v["user_id"], "7");
         assert_eq!(v["user_is_bot"], "false");
         assert_eq!(v["input"], "hej \"du\" \u{1f600}");
+        assert_eq!(v["context"], serde_json::json!([]));
         assert!(v.get("reply_to_user").is_none());
         assert!(v.get("reply_to_user_id").is_none());
         assert!(v.get("reply_to_text").is_none());
         assert!(v.get("reply_to_is_bot").is_none());
+        assert!(v.get("web_search_query").is_none());
+        assert!(v.get("mode").is_none());
+    }
+
+    #[test]
+    fn wire_body_marks_react_mode() {
+        let mut request = base_request();
+        request.react = true;
+        let v: serde_json::Value = serde_json::from_str(&wire_body(&request)).unwrap();
+        assert_eq!(v["mode"], "react");
     }
 
     #[test]
     fn wire_body_includes_reply_fields_when_present() {
         let mut request = base_request();
         request.user_is_bot = true;
+        request.context = vec![ChatContextMessage {
+            message_id: 88,
+            user: "Ada".to_string(),
+            user_id: 8,
+            text: "ambient context".to_string(),
+            is_bot: false,
+            is_self: false,
+            reply_to_message_id: Some(77),
+        }];
         request.reply_to = Some(ChatReplyTo {
+            message_id: 90,
             user: "SuperSighurt".to_string(),
             user_id: 99,
             text: "previous message".to_string(),
             is_bot: true,
             is_self: true,
         });
+        request.web_search = Some(WebSearchContext {
+            query: "Rust ownership".to_string(),
+            results: vec![crate::web_search::WebSearchResult {
+                title: "Ownership".to_string(),
+                url: "https://example.test/ownership".to_string(),
+                snippet: "Each value has an owner.".to_string(),
+            }],
+        });
         let v: serde_json::Value = serde_json::from_str(&wire_body(&request)).unwrap();
         assert_eq!(v["user_is_bot"], "true");
+        assert_eq!(v["context"][0]["message_id"], "88");
+        assert_eq!(v["context"][0]["user"], "Ada");
+        assert_eq!(v["context"][0]["reply_to_message_id"], "77");
+        assert_eq!(v["reply_to_message_id"], "90");
         assert_eq!(v["reply_to_user"], "SuperSighurt");
         assert_eq!(v["reply_to_user_id"], "99");
         assert_eq!(v["reply_to_text"], "previous message");
         assert_eq!(v["reply_to_is_bot"], "true");
         assert_eq!(v["reply_to_is_self"], "true");
+        assert_eq!(v["web_search_query"], "Rust ownership");
+        assert_eq!(v["web_results"][0]["title"], "Ownership");
     }
 
     #[test]

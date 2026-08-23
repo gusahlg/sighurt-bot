@@ -15,6 +15,14 @@ full single-machine architecture).
 - **Understands Discord replies**: when someone replies to a message
   (the bot's or anyone's), the replied-to author + text are sent to the
   LLM as context, and the bot's answer is posted as a real Discord reply.
+- **Understands the ambient conversation**: every trigger also carries the
+  newest structured channel messages (oldest first), including authors and
+  reply links, rather than presenting an isolated @-mention to the model.
+- **Searches the live web on explicit request**: `!search QUERY`, "search the
+  web for ...", and "look up ..." retrieve bounded HTTPS results before the
+  LLM call. Snippets are labelled as untrusted evidence and the bot appends the
+  provider URLs itself. `BRAVE_SEARCH_API_KEY` enables Brave; a zero-key
+  DuckDuckGo/Wikimedia fallback is built in.
 - **Talks to other bots** (`[chat] respond_to_bots`), with a
   `max_bot_chain` loop guard (default 3 consecutive bot-triggered
   replies per channel; any human message resets it) so two bots can't
@@ -52,7 +60,7 @@ full single-machine architecture).
 | `/ping` | Check if the bot is responsive | Everyone |
 | `/userinfo [user]` | Get information about a user | Everyone |
 | `/serverinfo` | Get information about the server | Everyone |
-| `/say <message>` | Make the bot send a message | Manage Messages |
+| `/say <message>` | Temporarily disabled during AI testing | Manage Messages |
 
 ### Auto-Moderation
 | Command | Description | Permission |
@@ -170,7 +178,7 @@ You should see:
 ```
 INFO discord_bot: Configuration loaded
 INFO discord_bot::database: Database initialized successfully
-INFO discord_bot::commands: Registered 10 slash commands
+INFO discord_bot::commands: Registered 9 slash commands
 INFO discord_bot::events: Bot is ready! Logged in as YourBot#1234
 ```
 
@@ -276,6 +284,7 @@ cargo build --release --target aarch64-unknown-linux-gnu
 | `DATABASE_URL` | SQLite database path (default: `sqlite:data/bot.db`) | No |
 | `RUST_LOG` | Log level: `trace`, `debug`, `info`, `warn`, `error` | No |
 | `LLM_API_KEY` | Shared secret for the SuperSighurt LLM server (enables chat) | For chat |
+| `BRAVE_SEARCH_API_KEY` | Optional broad web-search provider; zero-key fallback is automatic | No |
 | `ELEVENLABS_AGENT_ID` / `ELEVENLABS_API_KEY` | Voice bridge (optional) | For voice |
 
 ### Optional: config.toml
@@ -299,16 +308,26 @@ default_delete_days = 1
 [chat]
 enabled = true                    # boot state of the LLM chat (!ai toggles at runtime)
 endpoint_url = "http://127.0.0.1:8088"
-request_timeout_secs = 30
+request_timeout_secs = 90          # server allows 75s; leave client/transport margin
 admin_user_ids = [123456789012345678]
 respond_to_bots = true            # answer other bots' mentions/DMs
 max_bot_chain = 3                 # consecutive bot-triggered replies per channel before going quiet
 reply_context_max_chars = 300     # replied-to message excerpt sent to the LLM
+recent_context_messages = 12      # ambient channel messages, oldest first
+context_message_max_chars = 400   # per ambient-message cap
+web_search_enabled = true         # explicit live retrieval only
+web_search_max_results = 4        # bounded untrusted evidence snippets
+web_search_timeout_secs = 12
 
 [scrape]
 enabled = true                    # in-process backfill + catch-up scraper
 interval_hours = 24               # cadence after the ~30s post-boot run
 ```
+
+The deployed user service restarts the local model first and uses
+`scripts/wait_for_llm.sh` to wait for `/healthz` before opening the Discord
+gateway. The wait is non-fatal, so moderation and archive capture still start
+if model inference is temporarily unavailable.
 
 ---
 

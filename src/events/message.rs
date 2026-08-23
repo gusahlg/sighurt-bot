@@ -5,29 +5,44 @@ use std::time::Duration;
 use crate::ai::AiProcessor;
 use crate::automod::{AutoMod, AutoModAction};
 use crate::channel_state::ChannelState;
-use crate::chat::{ChatReplyTo, ChatRequest, ChatRuntime};
+use crate::chat::{ChatContextMessage, ChatReplyTo, ChatRequest, ChatRuntime};
 use crate::voice::{self, VoiceBridge};
+use crate::web_search::{explicit_search_query, WebSearchContext, WebSearchResult};
 use anyhow::Result;
 use discord_bot::channel_log;
 use twilight_http::Client;
-use twilight_model::channel::Message;
 use twilight_model::channel::message::{AllowedMentions, Mention};
+use twilight_model::channel::Message;
 use twilight_model::id::{
-    Id,
     marker::{GuildMarker, UserMarker},
+    Id,
 };
 
 const DISCORD_MAX_MESSAGE_LEN: usize = 1900;
 
+/// Minimum spacing between bot reactions per channel — an emoji here and
+/// there is charming, a bot that reacts to everything is a nuisance.
+const REACTION_MIN_GAP: Duration = Duration::from_secs(45);
+
+/// Abort a spawned background task (e.g. the typing-indicator loop) when the
+/// owning scope exits, on every path including `?` and panics.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 pub async fn handle_message(
     message: &Message,
-    http: &Client,
+    http: &Arc<Client>,
     automod: &AutoMod,
     ai: &AiProcessor,
-    chat: Option<&ChatRuntime>,
+    chat: Option<&Arc<ChatRuntime>>,
     voice_bridge: Option<&Arc<VoiceBridge>>,
     bot_user_id: Id<UserMarker>,
-    channel_state: &ChannelState,
+    channel_state: &Arc<ChannelState>,
     chat_min_reply_gap: Duration,
 ) -> Result<()> {
     // Log every message we see (including our own outgoing replies and
@@ -63,8 +78,7 @@ pub async fn handle_message(
             AutoModAction::None => {
                 if ai.is_enabled() {
                     if let Some(guild_id) = message.guild_id {
-                        if let Some(response) =
-                            ai.should_moderate(&message.content, guild_id).await
+                        if let Some(response) = ai.should_moderate(&message.content, guild_id).await
                         {
                             if response.should_moderate && response.is_high_confidence() {
                                 tracing::info!(
@@ -104,17 +118,38 @@ pub async fn handle_message(
         }
     }
 
-    // Chat path: only triggered in DMs or when @-mentioned.
+    // Chat path: triggered by DMs, @-mentions, Discord replies to the bot,
+    // and an unprompted jump-in roughly every N human messages per channel.
     let is_dm = message.guild_id.is_none();
     let is_mention = message.mentions.iter().any(|m| m.id == bot_user_id);
-    if !is_dm && !is_mention {
-        return Ok(());
-    }
+    // A reply to the bot with "notify" off carries no mention entry — catch it
+    // via the resolved referenced message so suppressed replies still work.
+    let is_reply_to_bot = message
+        .referenced_message
+        .as_ref()
+        .is_some_and(|referenced| referenced.author.id == bot_user_id);
     let Some(chat) = chat else {
         return Ok(());
     };
     if !chat.is_enabled() {
         return Ok(());
+    }
+    if !is_dm && !is_mention && !is_reply_to_bot {
+        // Unprompted jump-in: humans only, and claimed atomically so two
+        // concurrent messages can't both fire. Snowflake timestamp bits give
+        // the jitter entropy (the low id bits are not random).
+        let unprompted = !message.author.bot
+            && channel_state.try_claim_unprompted(
+                message.channel_id,
+                chat.unprompted_reply_every(),
+                message.id.get() >> 22,
+            );
+        if !unprompted {
+            // Not talking this time — but maybe reacting. Fire-and-forget so
+            // the event handler never blocks on a reaction round-trip.
+            maybe_react(message, http, chat, channel_state, bot_user_id);
+            return Ok(());
+        }
     }
 
     // Bot-authored triggers are gated by a config switch first (cheap, no
@@ -138,14 +173,7 @@ pub async fn handle_message(
         return Ok(());
     }
 
-    let result = run_chat_reply(
-        message,
-        http,
-        chat,
-        bot_user_id,
-        channel_state,
-    )
-    .await;
+    let result = run_chat_reply(message, http, chat, bot_user_id, channel_state).await;
     channel_state.end_chat(message.channel_id);
     result
 }
@@ -156,7 +184,7 @@ pub async fn handle_message(
 /// released if we don't actually deliver a reply.
 async fn run_chat_reply(
     message: &Message,
-    http: &Client,
+    http: &Arc<Client>,
     chat: &ChatRuntime,
     bot_user_id: Id<UserMarker>,
     channel_state: &ChannelState,
@@ -197,6 +225,21 @@ async fn run_chat_reply(
         return Ok(());
     }
 
+    // Show "SuperSighurt is typing…" for the whole think. One trigger lasts
+    // ~10s, so re-fire every 8s until the reply is posted (the task is
+    // aborted on every exit path below via the guard's Drop).
+    let typing = {
+        let http = Arc::clone(http);
+        let channel_id = message.channel_id;
+        AbortOnDrop(tokio::spawn(async move {
+            loop {
+                let _ = http.create_typing_trigger(channel_id).await;
+                tokio::time::sleep(Duration::from_secs(8)).await;
+            }
+        }))
+    };
+    let _ = &typing;
+
     // Reply context: prefer the gateway-provided referenced message, fall
     // back to a best-effort REST fetch when only the bare reference is there.
     let referenced = load_referenced_message(message, http).await;
@@ -205,6 +248,7 @@ async fn run_chat_reply(
             channel_state.display_name(message.channel_id, id)
         });
         ChatReplyTo {
+            message_id: r.id.get(),
             user: display_name_of(r),
             user_id: r.author.id.get(),
             text: truncate_chars(text.trim(), chat.reply_context_max_chars()),
@@ -213,13 +257,54 @@ async fn run_chat_reply(
         }
     });
 
+    // A mention normally occurs at the end of an ambient channel exchange.
+    // Fetch that exchange explicitly instead of asking the model to infer it
+    // from the trigger alone. This is best-effort: a transient REST/permission
+    // failure leaves an empty context but never blocks the reply path.
+    let context = load_recent_context(
+        message,
+        http,
+        bot_user_id,
+        channel_state,
+        chat.recent_context_messages(),
+        chat.context_message_max_chars(),
+    )
+    .await;
+
+    // Retrieval is opt-in by wording: ordinary conversation never creates
+    // external traffic. A failed/empty search is still represented so the LLM
+    // can be transparent instead of silently substituting stale model memory.
+    let web_search = match (explicit_search_query(prompt), chat.web_search()) {
+        (Some(query), Some(search_client)) => match search_client.search(&query).await {
+            Ok(search) => {
+                tracing::info!(
+                    "Live search query {:?} returned {} usable results",
+                    search.query,
+                    search.results.len()
+                );
+                Some(search)
+            }
+            Err(error) => {
+                tracing::warn!("Live search failed for {:?}: {:#}", query, error);
+                Some(WebSearchContext {
+                    query,
+                    results: Vec::new(),
+                })
+            }
+        },
+        _ => None,
+    };
+
     let request = ChatRequest {
         channel_id: message.channel_id.get(),
         user: display_name_of(message),
         user_id: message.author.id.get(),
         user_is_bot: message.author.bot,
         input: prompt.to_string(),
+        context,
         reply_to,
+        web_search,
+        react: false,
     };
 
     match chat.client().reply(&request).await {
@@ -234,7 +319,8 @@ async fn run_chat_reply(
             // safe length FIRST so ping resolution never operates on text that
             // a later cut would slice a `<@id>` token out of, then re-trim to a
             // `<@...>`-boundary-safe length after resolution.
-            let safe_input = truncate_chars(trimmed, DISCORD_MAX_MESSAGE_LEN);
+            let with_sources = append_source_links(trimmed, request.web_search.as_ref());
+            let safe_input = truncate_chars(&with_sources, DISCORD_MAX_MESSAGE_LEN);
             let (resolved_text, ping_ids) = resolve_outgoing_pings(
                 &safe_input,
                 message,
@@ -262,10 +348,16 @@ async fn run_chat_reply(
             {
                 Ok(builder) => {
                     if let Err(e) = builder.await {
-                        tracing::warn!("Failed to post chat reply: {}", e);
+                        // Display alone is terse ("Parsing or sending the
+                        // response failed"); the cause is in the source chain.
+                        tracing::warn!("Failed to post chat reply: {e} ({e:?})");
                         // Send failed: don't let the failed attempt consume the
                         // bot-chain budget.
                         release();
+                    } else {
+                        // Reply delivered: the unprompted-reply counter starts
+                        // over — the bot just spoke in this channel.
+                        channel_state.note_bot_reply(message.channel_id);
                     }
                     // Success: the reservation stands (this is the "reply
                     // actually sent" case for bot-triggered replies).
@@ -277,12 +369,141 @@ async fn run_chat_reply(
             }
         }
         Err(e) => {
-            tracing::warn!("LLM call failed: {}", e);
+            tracing::warn!("LLM call failed: {:#}", e);
             release();
         }
     }
 
     Ok(())
+}
+
+/// Occasionally offer a fresh human message to the LLM as a reaction
+/// opportunity: the model answers with one emoji or "pass". Sampling is a
+/// cheap deterministic roll on the snowflake's millisecond bits, the
+/// per-channel cooldown stops emoji spam, and the whole round-trip runs in a
+/// detached task so message handling never waits on it.
+fn maybe_react(
+    message: &Message,
+    http: &Arc<Client>,
+    chat: &Arc<ChatRuntime>,
+    channel_state: &Arc<ChannelState>,
+    bot_user_id: Id<UserMarker>,
+) {
+    if message.author.bot || message.content.trim().is_empty() {
+        return;
+    }
+    let probability = chat.react_probability();
+    if probability <= 0.0 {
+        return;
+    }
+    let roll = ((message.id.get() >> 22) % 1000) as f64 / 1000.0;
+    if roll >= probability {
+        return;
+    }
+    if !channel_state.try_claim_reaction(message.channel_id, REACTION_MIN_GAP) {
+        return;
+    }
+
+    let http = Arc::clone(http);
+    let chat = Arc::clone(chat);
+    let channel_state = Arc::clone(channel_state);
+    let message = message.clone();
+    tokio::spawn(async move {
+        let prompt = humanize_mentions(&message.content, &message.mentions, bot_user_id, |id| {
+            channel_state.display_name(message.channel_id, id)
+        });
+        let prompt = prompt.trim().to_string();
+        if prompt.is_empty() {
+            return;
+        }
+        // A short context window is plenty for "is this reaction-worthy" and
+        // keeps the extra prompt tokens (and GPU time) small.
+        let context = load_recent_context(
+            &message,
+            &http,
+            bot_user_id,
+            &channel_state,
+            chat.recent_context_messages().min(6),
+            chat.context_message_max_chars(),
+        )
+        .await;
+        let request = ChatRequest {
+            channel_id: message.channel_id.get(),
+            user: display_name_of(&message),
+            user_id: message.author.id.get(),
+            user_is_bot: false,
+            input: prompt,
+            context,
+            reply_to: None,
+            web_search: None,
+            react: true,
+        };
+        let reply = match chat.client().reply(&request).await {
+            Ok(reply) => reply,
+            Err(e) => {
+                tracing::debug!("React round-trip failed: {:#}", e);
+                return;
+            }
+        };
+        let Some(emoji) = extract_unicode_emoji(&reply) else {
+            tracing::debug!("Model passed on reacting (reply: {:?})", reply);
+            return;
+        };
+        let reaction = twilight_http::request::channel::reaction::RequestReactionType::Unicode {
+            name: &emoji,
+        };
+        match http
+            .create_reaction(message.channel_id, message.id, &reaction)
+            .await
+        {
+            // The gateway echoes our own ReactionAdd, which the logger skips
+            // (bot reactions must not enter the training data).
+            Ok(_) => tracing::info!(
+                "Reacted {} to message {} in channel {}",
+                emoji,
+                message.id,
+                message.channel_id
+            ),
+            Err(e) => tracing::debug!("create_reaction failed: {:#}", e),
+        }
+    });
+}
+
+/// Pull the first unicode emoji sequence out of an LLM reply (emoji chars
+/// plus ZWJ/variation-selector continuations), or `None` when the model
+/// declined ("pass") or produced no usable emoji.
+fn extract_unicode_emoji(reply: &str) -> Option<String> {
+    fn is_emoji(c: char) -> bool {
+        matches!(
+            u32::from(c),
+            0x1F000..=0x1FAFF | 0x2600..=0x27BF | 0x2B00..=0x2BFF
+        )
+    }
+    fn is_continuation(c: char) -> bool {
+        matches!(u32::from(c), 0x200D | 0xFE0F)
+    }
+    let mut chars = reply.chars().peekable();
+    while let Some(c) = chars.next() {
+        if !is_emoji(c) {
+            continue;
+        }
+        let mut out = String::new();
+        out.push(c);
+        while let Some(&next) = chars.peek() {
+            let last_was_joiner = out.chars().last().is_some_and(is_continuation);
+            if is_continuation(next) || (is_emoji(next) && last_was_joiner) {
+                out.push(next);
+                chars.next();
+            } else {
+                break;
+            }
+            if out.chars().count() >= 12 {
+                break;
+            }
+        }
+        return Some(out);
+    }
+    None
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -307,18 +528,18 @@ fn parse_ai_command(content: &str) -> Option<AiCommand> {
     }
 }
 
-async fn handle_ai_command(
-    cmd: AiCommand,
-    message: &Message,
-    http: &Client,
-    chat: &ChatRuntime,
-) {
+async fn handle_ai_command(cmd: AiCommand, message: &Message, http: &Client, chat: &ChatRuntime) {
     // Status is read-only and informational — anyone may run it. On/Off mutate
     // state and require an admin allowlist entry.
     let needs_admin = matches!(cmd, AiCommand::On | AiCommand::Off);
     if needs_admin {
         if !chat.has_admins() {
-            post(http, message, "AI toggle is not configured (chat.admin_user_ids is empty in config.toml).").await;
+            post(
+                http,
+                message,
+                "AI toggle is not configured (chat.admin_user_ids is empty in config.toml).",
+            )
+            .await;
             return;
         }
         if !chat.is_admin(message.author.id.get()) {
@@ -330,11 +551,19 @@ async fn handle_ai_command(
     let reply = match cmd {
         AiCommand::On => {
             let was = chat.set_enabled(true);
-            if was { "AI mode is already ON.".to_string() } else { "AI mode: ON.".to_string() }
+            if was {
+                "AI mode is already ON.".to_string()
+            } else {
+                "AI mode: ON.".to_string()
+            }
         }
         AiCommand::Off => {
             let was = chat.set_enabled(false);
-            if was { "AI mode: OFF.".to_string() } else { "AI mode is already OFF.".to_string() }
+            if was {
+                "AI mode: OFF.".to_string()
+            } else {
+                "AI mode is already OFF.".to_string()
+            }
         }
         AiCommand::Status => {
             if chat.is_enabled() {
@@ -367,6 +596,36 @@ fn display_name_of(message: &Message) -> String {
         .and_then(|m| m.nick.clone())
         .or_else(|| message.author.global_name.clone())
         .unwrap_or_else(|| message.author.name.clone())
+}
+
+/// Attach provider URLs outside the model's output, so an answer cannot invent
+/// or silently omit the evidence that was actually retrieved. Angle-bracket
+/// links suppress Discord embeds and keep the response compact.
+fn append_source_links(reply: &str, search: Option<&WebSearchContext>) -> String {
+    let Some(search) = search else {
+        return reply.to_string();
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut parts = Vec::new();
+    for (index, result) in search.results.iter().enumerate() {
+        if seen.insert(result.url.as_str()) {
+            let candidate = format!("[{}] <{}>", index + 1, result.url);
+            let projected = parts.iter().map(String::len).sum::<usize>()
+                + candidate.len()
+                + parts.len() * 3;
+            if projected > 900 {
+                break;
+            }
+            parts.push(candidate);
+        }
+    }
+    if parts.is_empty() {
+        return reply.to_string();
+    }
+    let suffix = format!("\n\nSources: {}", parts.join(" · "));
+    let suffix_chars = suffix.chars().count();
+    let reply_budget = DISCORD_MAX_MESSAGE_LEN.saturating_sub(suffix_chars);
+    format!("{}{}", truncate_chars(reply, reply_budget).trim_end(), suffix)
 }
 
 /// Char-boundary-safe truncation (`chars().take` never splits a codepoint).
@@ -422,6 +681,81 @@ async fn load_referenced_message(message: &Message, http: &Client) -> Option<Mes
             None
         }
     }
+}
+
+/// Fetch recent ambient channel context, oldest first. The triggering message
+/// itself is excluded because it already has a dedicated `input` field.
+async fn load_recent_context(
+    trigger: &Message,
+    http: &Client,
+    bot_user_id: Id<UserMarker>,
+    channel_state: &ChannelState,
+    max_messages: usize,
+    max_chars: usize,
+) -> Vec<ChatContextMessage> {
+    if max_messages == 0 {
+        return Vec::new();
+    }
+    // Anchor strictly before the trigger. Asking for the channel's latest page
+    // can race with new arrivals and make the model see messages from the
+    // future as if they preceded the trigger. Config validation caps this at 50.
+    let limit = max_messages.min(100) as u16;
+    let request = match http
+        .channel_messages(trigger.channel_id)
+        .before(trigger.id)
+        .limit(limit)
+    {
+        Ok(request) => request,
+        Err(error) => {
+            tracing::debug!("Failed to build recent-context request: {}", error);
+            return Vec::new();
+        }
+    };
+    let mut messages = match request.await {
+        Ok(response) => match response.models().await {
+            Ok(messages) => messages,
+            Err(error) => {
+                tracing::debug!("Failed to decode recent channel context: {}", error);
+                return Vec::new();
+            }
+        },
+        Err(error) => {
+            tracing::debug!("Failed to fetch recent channel context: {}", error);
+            return Vec::new();
+        }
+    };
+
+    // Discord returns newest first. Keep the newest N non-webhook ambient
+    // messages, then reverse into conversational order.
+    messages.retain(|message| message.webhook_id.is_none());
+    messages.truncate(max_messages);
+    messages.reverse();
+
+    messages
+        .into_iter()
+        .filter_map(|message| {
+            let text = humanize_mentions(&message.content, &message.mentions, bot_user_id, |id| {
+                channel_state.display_name(trigger.channel_id, id)
+            });
+            let text = truncate_chars(text.trim(), max_chars);
+            if text.is_empty() {
+                return None;
+            }
+            Some(ChatContextMessage {
+                message_id: message.id.get(),
+                user: display_name_of(&message),
+                user_id: message.author.id.get(),
+                text,
+                is_bot: message.author.bot,
+                is_self: message.author.id == bot_user_id,
+                reply_to_message_id: message
+                    .reference
+                    .as_ref()
+                    .and_then(|r| r.message_id)
+                    .map(|id| id.get()),
+            })
+        })
+        .collect()
 }
 
 /// Rewrite raw `<@id>` / `<@!id>` tokens into human-readable `@Name` text so
@@ -683,7 +1017,9 @@ async fn search_guild_member(
         .find(|m| {
             m.user.id != bot_user_id
                 && (m.user.name.to_lowercase() == needle
-                    || m.nick.as_deref().is_some_and(|n| n.to_lowercase() == needle))
+                    || m.nick
+                        .as_deref()
+                        .is_some_and(|n| n.to_lowercase() == needle))
         })
         .map(|m| m.user.id)
 }
@@ -887,7 +1223,10 @@ mod tests {
         let c = extract_ping_candidates("hi @gustav and @ fredrik!");
         assert_eq!(c.len(), 2);
         assert_eq!(c[0].name, "gustav");
-        assert_eq!(&"hi @gustav and @ fredrik!"[c[0].start..c[0].end], "@gustav");
+        assert_eq!(
+            &"hi @gustav and @ fredrik!"[c[0].start..c[0].end],
+            "@gustav"
+        );
         assert!(!c[0].spaced);
         assert_eq!(c[1].name, "fredrik");
         assert_eq!(
@@ -962,6 +1301,21 @@ mod tests {
     fn truncate_chars_is_boundary_safe() {
         assert_eq!(truncate_chars("héllo", 2), "hé");
         assert_eq!(truncate_chars("ab", 5), "ab");
+    }
+
+    #[test]
+    fn live_search_sources_are_appended_outside_model_text() {
+        let search = WebSearchContext {
+            query: "Rust ownership".to_string(),
+            results: vec![WebSearchResult {
+                title: "Ownership".to_string(),
+                url: "https://example.test/ownership".to_string(),
+                snippet: "Each value has one owner.".to_string(),
+            }],
+        };
+        let output = append_source_links("A value has one owner. [1]", Some(&search));
+        assert!(output.starts_with("A value has one owner. [1]"));
+        assert!(output.ends_with("Sources: [1] <https://example.test/ownership>"));
     }
 
     #[test]

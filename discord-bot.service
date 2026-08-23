@@ -1,32 +1,38 @@
 [Unit]
-Description=Discord Moderation Bot
-After=network-online.target
-Wants=network-online.target
+Description=SuperSighurt Discord bot (twilight + LLM client)
+After=network-online.target sighurt-llm.service
+Wants=network-online.target sighurt-llm.service
+# Never give up restarting; RestartSteps below backs off instead.
+StartLimitIntervalSec=0
 
 [Service]
-Type=simple
-User=discord-bot
-Group=discord-bot
-WorkingDirectory=/opt/discord-bot
-ExecStart=/opt/discord-bot/discord-bot
+# notify: the bot sends READY=1 once shards are created, and feeds the
+# watchdog below. An old binary without sd-notify will time out under this
+# unit — deploy binary and unit together.
+Type=notify
+WorkingDirectory=%h/discord-bot
+ExecStart=%h/discord-bot/target/release/discord-bot
+# Every (re)start of the bot also bounces the LLM server so a crash
+# recovers the whole stack, not just the bot half. "-" so a missing/broken
+# LLM unit doesn't keep the bot (moderation, scraping) down.
+ExecStartPre=-systemctl --user restart sighurt-llm.service
+# Type=simple reports "started" before the transformer has loaded. Prefer to
+# wait for /healthz so chat is ready when the gateway connects; the leading
+# "-" preserves moderation/scraping if the model remains unavailable.
+ExecStartPre=-%h/discord-bot/scripts/wait_for_llm.sh
+EnvironmentFile=%h/discord-bot/.env
+# always (not on-failure): the bot exits non-zero on gateway stalls, but a
+# spontaneous clean exit should also come back.
 Restart=always
-RestartSec=10
-
-# Environment
-EnvironmentFile=/opt/discord-bot/.env
-
-# Security hardening
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-PrivateTmp=true
-ReadWritePaths=/opt/discord-bot/data
-
-# Resource limits — bumped to fit Songbird's audio mixer + a live ElevenLabs
-# WebSocket. Voice mode brings symphonia + tls buffers along for the ride;
-# 256M was tight even before. CPU stays at 50% — voice is mostly I/O.
-MemoryMax=512M
-CPUQuota=50%
+RestartSec=5s
+RestartSteps=6
+RestartMaxDelaySec=300
+# Startup can sit behind a flapping network; give identify time to succeed.
+TimeoutStartSec=300
+# Kill + restart if the process stops pinging (whole-runtime deadlock).
+WatchdogSec=180
+StandardOutput=journal
+StandardError=journal
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target

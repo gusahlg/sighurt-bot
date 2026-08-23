@@ -27,13 +27,26 @@ default_delete_days = 1
 # `enabled` is the initial state of the runtime toggle — admins listed below
 # can flip it without restarting the bot via `!ai on`, `!ai off`, `!ai status`.
 enabled = true
-# URL of the LLM HTTP server on your desktop's Tailscale address.
-endpoint_url = "http://100.118.41.103:8088"
+# The production stack is co-located; keep model traffic on loopback.
+endpoint_url = "http://127.0.0.1:8088"
 # Per-request HTTP timeout.
-request_timeout_secs = 30
+request_timeout_secs = 90
 # Discord user IDs allowed to run `!ai on|off`. Leave empty to disable the
 # command entirely (status is still readable by anyone).
 admin_user_ids = []
 # Minimum seconds between chat replies per channel (flood/DoS guard on the chat
 # trigger; DMs aren't covered by automod). Must be > 0. Defaults to 2.
 min_seconds_between_replies = 2
+respond_to_bots = true
+max_bot_chain = 3
+# Explicit Discord-reply target plus recent ambient conversation supplied to
+# the model. Ambient messages are oldest-first and individually truncated.
+reply_context_max_chars = 300
+recent_context_messages = 12
+context_message_max_chars = 400
+# Explicit `!search QUERY`, "search the web for QUERY", and "look up QUERY"
+# requests retrieve live evidence. Set BRAVE_SEARCH_API_KEY for broad Brave
+# search; without it, DuckDuckGo Instant Answers + Wikimedia are used.
+web_search_enabled = true
+web_search_max_results = 4
+web_search_timeout_secs = 12
