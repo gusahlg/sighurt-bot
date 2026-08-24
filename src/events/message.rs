@@ -6,6 +6,7 @@ use crate::ai::AiProcessor;
 use crate::automod::{AutoMod, AutoModAction};
 use crate::channel_state::ChannelState;
 use crate::chat::{ChatContextMessage, ChatReplyTo, ChatRequest, ChatRuntime};
+use crate::reply_filter::ReplyScreen;
 use crate::voice::{self, VoiceBridge};
 use crate::web_search::{explicit_search_query, WebSearchContext, WebSearchResult};
 use anyhow::Result;
@@ -98,11 +99,16 @@ pub async fn handle_message(
             }
         }
 
-        // Admin command path: `!ai on|off|status`. Handled before the DM/mention
-        // gate so admins can toggle from any channel without @-mentioning the bot.
+        // Admin command path: `!ai on|off|status` and `!filter on|off|status`.
+        // Handled before the DM/mention gate so admins can toggle from any
+        // channel without @-mentioning the bot.
         if let Some(chat) = chat {
-            if let Some(cmd) = parse_ai_command(&message.content) {
+            if let Some(cmd) = parse_toggle_command(&message.content, "!ai") {
                 handle_ai_command(cmd, message, http, chat).await;
+                return Ok(());
+            }
+            if let Some(cmd) = parse_toggle_command(&message.content, "!filter") {
+                handle_filter_command(cmd, message, http, chat).await;
                 return Ok(());
             }
         }
@@ -228,7 +234,7 @@ async fn run_chat_reply(
     // Show "SuperSighurt is typing…" for the whole think. One trigger lasts
     // ~10s, so re-fire every 8s until the reply is posted (the task is
     // aborted on every exit path below via the guard's Drop).
-    let typing = {
+    let _typing = {
         let http = Arc::clone(http);
         let channel_id = message.channel_id;
         AbortOnDrop(tokio::spawn(async move {
@@ -238,7 +244,6 @@ async fn run_chat_reply(
             }
         }))
     };
-    let _ = &typing;
 
     // Reply context: prefer the gateway-provided referenced message, fall
     // back to a best-effort REST fetch when only the bare reference is there.
@@ -312,6 +317,22 @@ async fn run_chat_reply(
             let trimmed = reply.trim();
             if trimmed.is_empty() {
                 tracing::debug!("LLM returned empty reply; skipping post");
+                release();
+                return Ok(());
+            }
+            // Word filter: screen the model's own output BEFORE ping
+            // resolution so names are still plain text. A rejected reply is
+            // never posted; only the person being replied to learns why (DM).
+            if let ReplyScreen::Rejected { matched, reason } =
+                chat.filter().screen(trimmed).await
+            {
+                tracing::info!(
+                    "Chat reply withheld by word filter in channel {} ({}; matched {:?})",
+                    message.channel_id,
+                    reason,
+                    matched
+                );
+                notify_rejected_reply(http, message).await;
                 release();
                 return Ok(());
             }
@@ -506,74 +527,155 @@ fn extract_unicode_emoji(reply: &str) -> Option<String> {
     None
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum AiCommand {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToggleCommand {
     On,
     Off,
     Status,
 }
 
-fn parse_ai_command(content: &str) -> Option<AiCommand> {
+/// Parse `<name> [on|off|status]` commands (`!ai`, `!filter`). Bare `<name>`
+/// reads as status.
+fn parse_toggle_command(content: &str, name: &str) -> Option<ToggleCommand> {
     let trimmed = content.trim();
-    let rest = trimmed.strip_prefix("!ai")?;
-    // Require word boundary after `!ai` so `!aim` and similar don't match.
+    let rest = trimmed.strip_prefix(name)?;
+    // Require word boundary after the name so `!aim` and similar don't match.
     if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
         return None;
     }
     match rest.trim().to_ascii_lowercase().as_str() {
-        "on" | "enable" => Some(AiCommand::On),
-        "off" | "disable" => Some(AiCommand::Off),
-        "status" | "" => Some(AiCommand::Status),
+        "on" | "enable" => Some(ToggleCommand::On),
+        "off" | "disable" => Some(ToggleCommand::Off),
+        "status" | "" => Some(ToggleCommand::Status),
         _ => None,
     }
 }
 
-async fn handle_ai_command(cmd: AiCommand, message: &Message, http: &Client, chat: &ChatRuntime) {
-    // Status is read-only and informational — anyone may run it. On/Off mutate
-    // state and require an admin allowlist entry.
-    let needs_admin = matches!(cmd, AiCommand::On | AiCommand::Off);
-    if needs_admin {
-        if !chat.has_admins() {
-            post(
-                http,
-                message,
-                "AI toggle is not configured (chat.admin_user_ids is empty in config.toml).",
-            )
-            .await;
-            return;
-        }
-        if !chat.is_admin(message.author.id.get()) {
-            post(http, message, "You're not authorized to toggle AI mode.").await;
-            return;
-        }
+/// Admin gate shared by the runtime toggles. Status is read-only and open to
+/// everyone; On/Off mutate state and require an admin allowlist entry. Posts
+/// the refusal itself and returns whether the caller may proceed.
+async fn toggle_authorized(
+    cmd: ToggleCommand,
+    what: &str,
+    message: &Message,
+    http: &Client,
+    chat: &ChatRuntime,
+) -> bool {
+    if matches!(cmd, ToggleCommand::Status) {
+        return true;
     }
+    if !chat.has_admins() {
+        let text = format!(
+            "The {what} toggle is not configured (chat.admin_user_ids is empty in config.toml)."
+        );
+        post(http, message, &text).await;
+        return false;
+    }
+    if !chat.is_admin(message.author.id.get()) {
+        post(http, message, &format!("You're not authorized to toggle {what}.")).await;
+        return false;
+    }
+    true
+}
 
+/// Render the reply for a toggle that was applied: `set` returns the previous
+/// state, so "already ON/OFF" falls out of comparing it with the request.
+fn toggle_reply(what: &str, cmd: ToggleCommand, was_on: impl FnOnce(bool) -> bool) -> String {
+    match cmd {
+        ToggleCommand::On => {
+            if was_on(true) {
+                format!("{what} is already ON.")
+            } else {
+                format!("{what}: ON.")
+            }
+        }
+        ToggleCommand::Off => {
+            if was_on(false) {
+                format!("{what}: OFF.")
+            } else {
+                format!("{what} is already OFF.")
+            }
+        }
+        ToggleCommand::Status => unreachable!("status renders its own reply"),
+    }
+}
+
+async fn handle_ai_command(
+    cmd: ToggleCommand,
+    message: &Message,
+    http: &Client,
+    chat: &ChatRuntime,
+) {
+    if !toggle_authorized(cmd, "AI mode", message, http, chat).await {
+        return;
+    }
     let reply = match cmd {
-        AiCommand::On => {
-            let was = chat.set_enabled(true);
-            if was {
-                "AI mode is already ON.".to_string()
-            } else {
-                "AI mode: ON.".to_string()
+        ToggleCommand::Status => format!(
+            "AI mode: {}.",
+            if chat.is_enabled() { "ON" } else { "OFF" }
+        ),
+        cmd => toggle_reply("AI mode", cmd, |v| chat.set_enabled(v)),
+    };
+    post(http, message, &reply).await;
+}
+
+async fn handle_filter_command(
+    cmd: ToggleCommand,
+    message: &Message,
+    http: &Client,
+    chat: &ChatRuntime,
+) {
+    if !toggle_authorized(cmd, "the word filter", message, http, chat).await {
+        return;
+    }
+    let filter = chat.filter();
+    let reply = match cmd {
+        ToggleCommand::Status => format!(
+            "Word filter: {}. AI judge: {}.",
+            if filter.is_enabled() { "ON" } else { "OFF" },
+            filter.judge_description()
+        ),
+        cmd => toggle_reply("Word filter", cmd, |v| filter.set_enabled(v)),
+    };
+    post(http, message, &reply).await;
+}
+
+/// Tell ONLY the person the bot was replying to that the reply was withheld.
+/// Guild triggers get a DM (the channel itself never sees a trace); DM
+/// triggers are already private, so the notice lands right there. Best-effort:
+/// closed DMs just drop the notice (never fall back to posting publicly).
+async fn notify_rejected_reply(http: &Client, message: &Message) {
+    const NOTICE: &str = "SuperSighurt's reply to your message was rejected because it \
+potentially contained text that is against the guidelines.";
+    if message.author.bot {
+        return;
+    }
+    let channel_id = if message.guild_id.is_none() {
+        message.channel_id
+    } else {
+        let response = match http.create_private_channel(message.author.id).await {
+            Ok(response) => response,
+            Err(e) => {
+                tracing::debug!("Failed to open DM for rejection notice: {}", e);
+                return;
             }
-        }
-        AiCommand::Off => {
-            let was = chat.set_enabled(false);
-            if was {
-                "AI mode: OFF.".to_string()
-            } else {
-                "AI mode is already OFF.".to_string()
-            }
-        }
-        AiCommand::Status => {
-            if chat.is_enabled() {
-                "AI mode: ON.".to_string()
-            } else {
-                "AI mode: OFF.".to_string()
+        };
+        match response.model().await {
+            Ok(channel) => channel.id,
+            Err(e) => {
+                tracing::debug!("Failed to decode DM channel for rejection notice: {}", e);
+                return;
             }
         }
     };
-    post(http, message, &reply).await;
+    match http.create_message(channel_id).content(NOTICE) {
+        Ok(builder) => {
+            if let Err(e) = builder.await {
+                tracing::debug!("Failed to send rejection notice: {}", e);
+            }
+        }
+        Err(e) => tracing::debug!("Invalid rejection notice content: {}", e),
+    }
 }
 
 async fn post(http: &Client, message: &Message, text: &str) {
@@ -1141,22 +1243,51 @@ mod tests {
     }
 
     #[test]
-    fn parse_ai_command_matches() {
-        assert_eq!(parse_ai_command("!ai on"), Some(AiCommand::On));
-        assert_eq!(parse_ai_command("  !ai   ON  "), Some(AiCommand::On));
-        assert_eq!(parse_ai_command("!ai off"), Some(AiCommand::Off));
-        assert_eq!(parse_ai_command("!ai enable"), Some(AiCommand::On));
-        assert_eq!(parse_ai_command("!ai disable"), Some(AiCommand::Off));
-        assert_eq!(parse_ai_command("!ai status"), Some(AiCommand::Status));
-        assert_eq!(parse_ai_command("!ai"), Some(AiCommand::Status));
+    fn parse_toggle_command_matches() {
+        let parse = |content| parse_toggle_command(content, "!ai");
+        assert_eq!(parse("!ai on"), Some(ToggleCommand::On));
+        assert_eq!(parse("  !ai   ON  "), Some(ToggleCommand::On));
+        assert_eq!(parse("!ai off"), Some(ToggleCommand::Off));
+        assert_eq!(parse("!ai enable"), Some(ToggleCommand::On));
+        assert_eq!(parse("!ai disable"), Some(ToggleCommand::Off));
+        assert_eq!(parse("!ai status"), Some(ToggleCommand::Status));
+        assert_eq!(parse("!ai"), Some(ToggleCommand::Status));
+        // The same parser drives `!filter`.
+        assert_eq!(
+            parse_toggle_command("!filter off", "!filter"),
+            Some(ToggleCommand::Off)
+        );
+        assert_eq!(
+            parse_toggle_command("!filter", "!filter"),
+            Some(ToggleCommand::Status)
+        );
     }
 
     #[test]
-    fn parse_ai_command_rejects_non_matches() {
-        assert_eq!(parse_ai_command("!aim for the moon"), None);
-        assert_eq!(parse_ai_command("ai on"), None);
-        assert_eq!(parse_ai_command("!ai bogus"), None);
-        assert_eq!(parse_ai_command("hello !ai on"), None);
+    fn parse_toggle_command_rejects_non_matches() {
+        let parse = |content| parse_toggle_command(content, "!ai");
+        assert_eq!(parse("!aim for the moon"), None);
+        assert_eq!(parse("ai on"), None);
+        assert_eq!(parse("!ai bogus"), None);
+        assert_eq!(parse("hello !ai on"), None);
+        assert_eq!(parse_toggle_command("!filtering", "!filter"), None);
+    }
+
+    #[test]
+    fn toggle_reply_reports_state_transitions() {
+        assert_eq!(toggle_reply("AI mode", ToggleCommand::On, |_| false), "AI mode: ON.");
+        assert_eq!(
+            toggle_reply("AI mode", ToggleCommand::On, |_| true),
+            "AI mode is already ON."
+        );
+        assert_eq!(
+            toggle_reply("Word filter", ToggleCommand::Off, |_| true),
+            "Word filter: OFF."
+        );
+        assert_eq!(
+            toggle_reply("Word filter", ToggleCommand::Off, |_| false),
+            "Word filter is already OFF."
+        );
     }
 
     #[test]

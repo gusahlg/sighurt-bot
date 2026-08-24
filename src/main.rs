@@ -6,6 +6,7 @@ mod commands;
 mod config;
 mod database;
 mod events;
+mod reply_filter;
 mod voice;
 mod web_search;
 
@@ -96,8 +97,15 @@ async fn main() -> Result<()> {
     // the *initial* state of the runtime toggle, not whether the runtime exists,
     // so admins listed in `chat.admin_user_ids` can flip it via `!ai on`.
     let chat_runtime: Option<Arc<ChatRuntime>> = match env::var("LLM_API_KEY") {
-        Ok(key) => match ChatClient::new(&config.chat, key) {
-            Ok(client) => {
+        Ok(key) => match ChatClient::new(&config.chat, key).and_then(|client| {
+            // The outgoing-reply word filter belongs to the chat runtime: a
+            // filter build error (bad judge config) disables chat entirely
+            // rather than silently running unfiltered.
+            let filter = reply_filter::ReplyFilter::from_config(&config.filter)?;
+            Ok((client, filter))
+        }) {
+            Ok((client, filter)) => {
+                tracing::info!("{}", filter.boot_summary());
                 let search = match WebSearchClient::new(
                     &config.chat,
                     env::var("BRAVE_SEARCH_API_KEY").ok(),
@@ -108,7 +116,7 @@ async fn main() -> Result<()> {
                         None
                     }
                 };
-                let runtime = ChatRuntime::new(client, &config.chat, search);
+                let runtime = ChatRuntime::new(client, &config.chat, search, filter);
                 tracing::info!(
                     "Chat runtime ready (initial = {}); LLM endpoint = {}; admins = {}; web search = {}",
                     if config.chat.enabled { "ON" } else { "OFF" },

@@ -13,6 +13,8 @@ pub struct Config {
     #[serde(default)]
     pub chat: ChatConfig,
     #[serde(default)]
+    pub filter: FilterConfig,
+    #[serde(default)]
     pub scrape: ScrapeConfig,
 }
 
@@ -118,6 +120,41 @@ pub struct ChatConfig {
     pub react_probability: f64,
 }
 
+/// Two-step word filter over the bot's own outgoing chat replies: a lexical
+/// deny-list screen, then a local AI judge for anything the screen flags.
+/// See `reply_filter.rs` for the mechanics; this is just the wiring.
+#[derive(Debug, Deserialize)]
+pub struct FilterConfig {
+    /// Boot state of the runtime filter toggle (`!filter on|off` flips it at
+    /// runtime, same admin allowlist as `!ai`).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// OpenAI-compatible chat-completions URL of a LOCAL judge model, e.g.
+    /// ollama's `http://127.0.0.1:11434/v1/chat/completions`. Anything that
+    /// speaks that wire format works (llama.cpp server, LM Studio, vLLM...).
+    /// Unset = no judge: lexically flagged replies are rejected outright.
+    #[serde(default)]
+    pub judge_url: Option<String>,
+    /// Model name passed to the judge endpoint (e.g. "llama-guard3:1b").
+    /// Required when judge_url is set.
+    #[serde(default)]
+    pub judge_model: Option<String>,
+    /// "guard" (default) for safety-classifier models that answer
+    /// safe/unsafe with their own built-in prompt (llama-guard); "instruct"
+    /// for generic chat models that get a yes/no moderation instruction.
+    #[serde(default = "default_judge_kind")]
+    pub judge_kind: String,
+    /// Per-request judge timeout. Generous by default: a CPU-only 1B model
+    /// cold-loading can take a while, and a timeout rejects (fail-closed).
+    #[serde(default = "default_judge_timeout_secs")]
+    pub judge_timeout_secs: u64,
+    /// Optional extra deny-list file: one lowercase term per line, `#`
+    /// comments. Multi-word lines become phrases, single words exact-token
+    /// terms. Lets admins extend the list without recompiling.
+    #[serde(default)]
+    pub words_file: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ScrapeConfig {
     /// Run the in-process periodic catch-up scrape (backfill-if-needed plus
@@ -218,6 +255,27 @@ fn default_react_probability() -> f64 {
     0.2
 }
 
+fn default_judge_timeout_secs() -> u64 {
+    45
+}
+
+fn default_judge_kind() -> String {
+    "guard".to_string()
+}
+
+impl FilterConfig {
+    pub fn judge_kind(&self) -> anyhow::Result<crate::reply_filter::JudgeKind> {
+        match self.judge_kind.trim() {
+            "guard" => Ok(crate::reply_filter::JudgeKind::Guard),
+            "instruct" => Ok(crate::reply_filter::JudgeKind::Instruct),
+            other => anyhow::bail!(
+                "filter.judge_kind must be \"guard\" or \"instruct\", got {:?}",
+                other
+            ),
+        }
+    }
+}
+
 impl Default for AutomodConfig {
     fn default() -> Self {
         Self {
@@ -274,6 +332,19 @@ impl Default for ChatConfig {
     }
 }
 
+impl Default for FilterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            judge_url: None,
+            judge_model: None,
+            judge_kind: default_judge_kind(),
+            judge_timeout_secs: default_judge_timeout_secs(),
+            words_file: None,
+        }
+    }
+}
+
 impl Default for ScrapeConfig {
     fn default() -> Self {
         Self {
@@ -290,6 +361,7 @@ impl Default for Config {
             moderation: ModerationConfig::default(),
             ai: AiModeConfig::default(),
             chat: ChatConfig::default(),
+            filter: FilterConfig::default(),
             scrape: ScrapeConfig::default(),
         }
     }
@@ -383,6 +455,23 @@ impl Config {
         }
         if !(0.0..=1.0).contains(&self.chat.react_probability) {
             anyhow::bail!("chat.react_probability must be in 0.0..=1.0");
+        }
+
+        // Validate reply-filter settings (same unconditional rule as chat:
+        // `!filter on` can activate the path at runtime).
+        let judge_url = self.filter.judge_url.as_deref().map(str::trim).unwrap_or("");
+        if !judge_url.is_empty() {
+            if !judge_url.starts_with("http://") && !judge_url.starts_with("https://") {
+                anyhow::bail!("filter.judge_url must be an http(s) URL");
+            }
+            let judge_model = self.filter.judge_model.as_deref().map(str::trim).unwrap_or("");
+            if judge_model.is_empty() {
+                anyhow::bail!("filter.judge_model is required when filter.judge_url is set");
+            }
+        }
+        self.filter.judge_kind()?;
+        if self.filter.judge_timeout_secs == 0 || self.filter.judge_timeout_secs > 300 {
+            anyhow::bail!("filter.judge_timeout_secs must be in 1..=300");
         }
 
         // Validate scrape settings
@@ -591,6 +680,62 @@ mod tests {
         assert!(config.validate().is_err());
         config.chat.web_search_max_results = 4;
         config.chat.web_search_timeout_secs = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_filter_config_default() {
+        let config = FilterConfig::default();
+        assert!(config.enabled);
+        assert!(config.judge_url.is_none());
+        assert!(config.judge_model.is_none());
+        assert_eq!(config.judge_kind, "guard");
+        assert_eq!(config.judge_timeout_secs, 45);
+        assert!(config.words_file.is_none());
+    }
+
+    #[test]
+    fn test_config_parse_filter() {
+        let toml_content = r#"
+            [filter]
+            enabled = false
+            judge_url = "http://127.0.0.1:11434/v1/chat/completions"
+            judge_model = "llama-guard3:1b"
+        "#;
+        let config: Config = toml::from_str(toml_content).unwrap();
+        assert!(!config.filter.enabled);
+        assert_eq!(
+            config.filter.judge_url.as_deref(),
+            Some("http://127.0.0.1:11434/v1/chat/completions")
+        );
+        assert_eq!(config.filter.judge_model.as_deref(), Some("llama-guard3:1b"));
+        assert!(config.validate().is_ok());
+        // Absent section falls back to defaults (filter ON, no judge).
+        let config: Config = toml::from_str("").unwrap();
+        assert!(config.filter.enabled);
+        assert!(config.filter.judge_url.is_none());
+    }
+
+    #[test]
+    fn test_config_validate_filter_judge() {
+        // judge_url without a model name is a config error.
+        let mut config = Config::default();
+        config.filter.judge_url = Some("http://127.0.0.1:11434/v1/chat/completions".into());
+        assert!(config.validate().is_err());
+        config.filter.judge_model = Some("llama-guard3:1b".into());
+        assert!(config.validate().is_ok());
+        // Non-http URL is a config error.
+        config.filter.judge_url = Some("ollama:11434".into());
+        assert!(config.validate().is_err());
+        // Unknown judge kind is a config error even without a judge_url.
+        let mut config = Config::default();
+        config.filter.judge_kind = "vibes".into();
+        assert!(config.validate().is_err());
+        // Timeout bounds.
+        let mut config = Config::default();
+        config.filter.judge_timeout_secs = 0;
+        assert!(config.validate().is_err());
+        config.filter.judge_timeout_secs = 301;
         assert!(config.validate().is_err());
     }
 

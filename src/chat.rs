@@ -1,6 +1,7 @@
 //! HTTP client that calls the SuperSighurt LLM server living on the desktop.
 
 use crate::config::ChatConfig;
+use crate::reply_filter::ReplyFilter;
 use crate::web_search::{WebSearchClient, WebSearchContext};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
@@ -27,6 +28,8 @@ pub struct ChatRuntime {
     unprompted_reply_every: u32,
     react_probability: f64,
     web_search: Option<WebSearchClient>,
+    /// Screens outgoing replies (two-step: deny-list, then local AI judge).
+    filter: ReplyFilter,
 }
 
 impl ChatRuntime {
@@ -34,6 +37,7 @@ impl ChatRuntime {
         client: ChatClient,
         cfg: &ChatConfig,
         web_search: Option<WebSearchClient>,
+        filter: ReplyFilter,
     ) -> Arc<Self> {
         Arc::new(Self {
             client,
@@ -47,6 +51,7 @@ impl ChatRuntime {
             unprompted_reply_every: cfg.unprompted_reply_every,
             react_probability: cfg.react_probability,
             web_search,
+            filter,
         })
     }
 
@@ -101,6 +106,10 @@ impl ChatRuntime {
 
     pub fn web_search(&self) -> Option<&WebSearchClient> {
         self.web_search.as_ref()
+    }
+
+    pub fn filter(&self) -> &ReplyFilter {
+        &self.filter
     }
 }
 

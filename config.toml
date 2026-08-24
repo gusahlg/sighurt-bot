@@ -55,6 +55,30 @@ web_search_enabled = true
 web_search_max_results = 4
 web_search_timeout_secs = 12
 
+[filter]
+# Two-step word filter on SuperSighurt's OWN outgoing replies: a lexical
+# deny-list screen (racist/harassment/disturbing terms; profanity alone is
+# not filtered), then the AI judge below for anything the screen flags — so
+# a trigger word in a harmless sentence doesn't censor the reply. Rejected
+# replies are never posted; the person being replied to is told privately.
+# `enabled` is the boot state; admins in chat.admin_user_ids can flip it at
+# runtime via `!filter on|off|status`.
+enabled = true
+# LOCAL judge model behind an OpenAI-compatible chat-completions API (ollama
+# here; llama.cpp server, LM Studio etc. also work). Fail-closed: with no
+# judge, or the judge unreachable, flagged replies are rejected outright.
+# llama-guard3 is a purpose-built safety classifier ("guard" kind); a plain
+# chat model works with judge_kind = "instruct", but tested badly
+# (llama3.2:1b's verdicts were near-random — see reply_filter.rs).
+judge_url = "http://127.0.0.1:11434/v1/chat/completions"
+judge_model = "llama-guard3:1b"
+judge_kind = "guard"
+# Generous timeout: ollama cold-loads the model on first use.
+judge_timeout_secs = 45
+# Optional extra deny-list terms, one per line, `#` comments. Multi-word
+# lines match as phrases, single words as whole tokens.
+# words_file = "data/filter_words.txt"
+
 [scrape]
 # In-process history catch-up. ~30 seconds after startup the bot walks every
 # guild it is in — channels, active threads, archived public threads, forum

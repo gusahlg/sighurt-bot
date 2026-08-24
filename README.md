@@ -32,6 +32,17 @@ full single-machine architecture).
   to a real `<@id>` ping. Everything else is ping-suppressed via a
   strict `allowed_mentions` (the global default suppresses ALL pings —
   no accidental `@everyone`).
+- **Outgoing word filter** (`[filter]`, `!filter on|off|status` for the same
+  admins as `!ai`): every reply the bot is about to post is screened in two
+  steps — a lexical deny-list of racist/harassment/disturbing terms (persona
+  profanity is deliberately not filtered), then a **local AI judge** (any
+  OpenAI-compatible endpoint; production uses ollama with `llama-guard3:1b`,
+  a purpose-built safety classifier) that decides whether a lexically flagged
+  reply actually breaks the guidelines. Unambiguous terms (slurs, self-harm
+  directives, hate slogans) skip the judge and reject outright. Fail-closed:
+  no judge or judge down means flagged replies are dropped. A rejected reply is
+  never posted; the person being replied to is told privately (DM) that the
+  reply was withheld — the channel sees nothing.
 
 ### Training-data capture
 - Logs **every message in every server** (humans and bots) to
@@ -318,6 +329,14 @@ context_message_max_chars = 400   # per ambient-message cap
 web_search_enabled = true         # explicit live retrieval only
 web_search_max_results = 4        # bounded untrusted evidence snippets
 web_search_timeout_secs = 12
+
+[filter]
+enabled = true                    # boot state of the outgoing word filter (!filter toggles at runtime)
+judge_url = "http://127.0.0.1:11434/v1/chat/completions"  # local OpenAI-compatible judge (ollama)
+judge_model = "llama-guard3:1b"   # required when judge_url is set
+judge_kind = "guard"              # "guard" = safe/unsafe classifier; "instruct" = yes/no chat model
+judge_timeout_secs = 45           # generous: ollama cold-loads on first use
+# words_file = "data/filter_words.txt"  # optional extra deny-list terms
 
 [scrape]
 enabled = true                    # in-process backfill + catch-up scraper

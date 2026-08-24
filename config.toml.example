@@ -50,3 +50,29 @@ context_message_max_chars = 400
 web_search_enabled = true
 web_search_max_results = 4
 web_search_timeout_secs = 12
+
+[filter]
+# Two-step word filter on the bot's OWN outgoing chat replies: a lexical
+# deny-list screen (racist / harassment / disturbing terms; profanity alone
+# is not filtered), then an AI judge for anything the screen flags — so a
+# trigger word inside a harmless sentence doesn't censor the reply. Rejected
+# replies are never posted; only the person being replied to is notified,
+# privately. `enabled` is the boot state of the runtime toggle — the admins
+# in chat.admin_user_ids can flip it via `!filter on|off|status`.
+enabled = true
+# LOCAL judge model behind an OpenAI-compatible chat-completions endpoint —
+# ollama (`http://127.0.0.1:11434/v1/chat/completions`), llama.cpp server,
+# LM Studio, vLLM all work. The filter is fail-closed: with judge_url unset,
+# or the judge unreachable, lexically flagged replies are rejected outright.
+# Prefer a guard-class safety classifier (judge_kind = "guard", answers
+# safe/unsafe, e.g. `ollama pull llama-guard3:1b`); judge_kind = "instruct"
+# sends a yes/no moderation instruction to a generic chat model instead,
+# but small instruct models judge near-randomly.
+# judge_url = "http://127.0.0.1:11434/v1/chat/completions"
+# judge_model = "llama-guard3:1b"
+# judge_kind = "guard"
+# Per-request judge timeout; generous because ollama cold-loads on first use.
+judge_timeout_secs = 45
+# Optional extra deny-list terms, one lowercase term per line, `#` comments.
+# Multi-word lines match as phrases, single words as whole tokens.
+# words_file = "data/filter_words.txt"
