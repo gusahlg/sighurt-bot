@@ -54,6 +54,15 @@ min_seconds_between_replies = 2
 web_search_enabled = true
 web_search_max_results = 4
 web_search_timeout_secs = 12
+# Post a short public notice in-channel when the reply filter blocks Sig's own
+# output (transparency + it's funny; the replied-to user still gets a DM too).
+notify_on_rejection = true
+# Post a short public notice when generation errors (model server down/timeout/
+# queue full) instead of failing silently.
+notify_on_error = true
+# Min seconds between those notices per channel, so a broken backend can't spam
+# a channel. 0 disables the limit.
+notice_cooldown_secs = 30
 
 [filter]
 # Two-step word filter on SuperSighurt's OWN outgoing replies: a lexical

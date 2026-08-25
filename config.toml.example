@@ -50,6 +50,10 @@ context_message_max_chars = 400
 web_search_enabled = true
 web_search_max_results = 4
 web_search_timeout_secs = 12
+# Public notices: on filter-rejection and on generation errors (rate-limited).
+notify_on_rejection = true
+notify_on_error = true
+notice_cooldown_secs = 30
 
 [filter]
 # Two-step word filter on the bot's OWN outgoing chat replies: a lexical

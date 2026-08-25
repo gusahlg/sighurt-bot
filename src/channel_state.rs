@@ -45,6 +45,9 @@ struct ChannelEntry {
     unprompted_target: u32,
     /// When the bot last added a reaction in this channel (spam brake).
     last_reaction: Option<Instant>,
+    /// When the bot last posted a moderation/error notice in this channel.
+    /// Rate-limits those notices so a down model server can't spam the channel.
+    last_notice: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -210,6 +213,22 @@ impl ChannelState {
             }
         }
         entry.last_reaction = Some(now);
+        true
+    }
+
+    /// Claim a moderation/error notice slot if the per-channel cooldown has
+    /// elapsed. Stamps immediately so a burst of failures posts at most one
+    /// notice per window. `min_gap` of zero always allows (cooldown disabled).
+    pub fn try_claim_notice(&self, channel_id: Id<ChannelMarker>, min_gap: Duration) -> bool {
+        let now = Instant::now();
+        let mut channels = self.channels.lock();
+        let entry = channels.entry(channel_id).or_default();
+        if let Some(last) = entry.last_notice {
+            if now.duration_since(last) < min_gap {
+                return false;
+            }
+        }
+        entry.last_notice = Some(now);
         true
     }
 

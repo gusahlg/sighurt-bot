@@ -333,6 +333,16 @@ async fn run_chat_reply(
                     matched
                 );
                 notify_rejected_reply(http, message).await;
+                // Public, in-character notice so the room can see the
+                // moderation working (rate-limited to avoid spam).
+                if chat.notify_on_rejection() && notice_allowed(chat, channel_state, message) {
+                    post_notice(
+                        http,
+                        message,
+                        "🛡️ nope — my own filter just yoinked that reply before it hit the chat. some things even i don't get to say.",
+                    )
+                    .await;
+                }
                 release();
                 return Ok(());
             }
@@ -391,11 +401,56 @@ async fn run_chat_reply(
         }
         Err(e) => {
             tracing::warn!("LLM call failed: {:#}", e);
+            // Surface the failure instead of going silent, so the room (and
+            // you) can see something broke. Kept in-voice and rate-limited;
+            // the diagnostic detail stays in the log above.
+            if chat.notify_on_error() && notice_allowed(chat, channel_state, message) {
+                post_notice(
+                    http,
+                    message,
+                    "💥 ugh my brain just glitched out — the model backend errored on that one. poke me again in a sec.",
+                )
+                .await;
+            }
             release();
         }
     }
 
     Ok(())
+}
+
+/// Rate-limit gate for moderation/error notices: at most one per channel per
+/// `notice_cooldown_secs`. A cooldown of 0 disables the limit.
+fn notice_allowed(chat: &ChatRuntime, channel_state: &ChannelState, message: &Message) -> bool {
+    let cooldown = Duration::from_secs(chat.notice_cooldown_secs());
+    if cooldown.is_zero() {
+        return true;
+    }
+    channel_state.try_claim_notice(message.channel_id, cooldown)
+}
+
+/// Post a short public notice as a reply to the triggering message. Best-effort:
+/// failures are logged, never propagated (a notice must not itself error out).
+async fn post_notice(http: &Client, message: &Message, text: &str) {
+    let allowed = AllowedMentions {
+        parse: Vec::new(),
+        replied_user: false,
+        roles: Vec::new(),
+        users: Vec::new(),
+    };
+    match http
+        .create_message(message.channel_id)
+        .reply(message.id)
+        .allowed_mentions(Some(&allowed))
+        .content(text)
+    {
+        Ok(builder) => {
+            if let Err(e) = builder.await {
+                tracing::debug!("Failed to post notice: {e}");
+            }
+        }
+        Err(e) => tracing::debug!("Invalid notice content: {e}"),
+    }
 }
 
 /// Occasionally offer a fresh human message to the LLM as a reaction

@@ -118,6 +118,19 @@ pub struct ChatConfig {
     /// 0 disables bot reactions entirely.
     #[serde(default = "default_react_probability")]
     pub react_probability: f64,
+    /// Post a short public notice in-channel when the reply filter blocks
+    /// Sig's own output (transparency + it's funny). Off = silent (the
+    /// replied-to user still gets a private DM).
+    #[serde(default = "default_true")]
+    pub notify_on_rejection: bool,
+    /// Post a short public notice in-channel when generation errors out
+    /// (model server down, timeout, queue full) instead of failing silently.
+    #[serde(default = "default_true")]
+    pub notify_on_error: bool,
+    /// Minimum seconds between those notices per channel, so a persistently
+    /// broken backend can't spam a channel with error messages. 0 = no limit.
+    #[serde(default = "default_notice_cooldown_secs")]
+    pub notice_cooldown_secs: u64,
 }
 
 /// Two-step content filter over the bot's own outgoing chat replies: a
@@ -255,6 +268,10 @@ fn default_react_probability() -> f64 {
     0.2
 }
 
+fn default_notice_cooldown_secs() -> u64 {
+    30
+}
+
 fn default_judge_timeout_secs() -> u64 {
     45
 }
@@ -328,6 +345,9 @@ impl Default for ChatConfig {
             web_search_timeout_secs: default_web_search_timeout_secs(),
             unprompted_reply_every: default_unprompted_reply_every(),
             react_probability: default_react_probability(),
+            notify_on_rejection: true,
+            notify_on_error: true,
+            notice_cooldown_secs: default_notice_cooldown_secs(),
         }
     }
 }

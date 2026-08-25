@@ -27,6 +27,9 @@ pub struct ChatRuntime {
     context_message_max_chars: usize,
     unprompted_reply_every: u32,
     react_probability: f64,
+    notify_on_rejection: bool,
+    notify_on_error: bool,
+    notice_cooldown_secs: u64,
     web_search: Option<WebSearchClient>,
     /// Screens outgoing replies (two-step: deny-list, then local AI judge).
     filter: ReplyFilter,
@@ -50,6 +53,9 @@ impl ChatRuntime {
             context_message_max_chars: cfg.context_message_max_chars,
             unprompted_reply_every: cfg.unprompted_reply_every,
             react_probability: cfg.react_probability,
+            notify_on_rejection: cfg.notify_on_rejection,
+            notify_on_error: cfg.notify_on_error,
+            notice_cooldown_secs: cfg.notice_cooldown_secs,
             web_search,
             filter,
         })
@@ -94,6 +100,18 @@ impl ChatRuntime {
 
     pub fn unprompted_reply_every(&self) -> u32 {
         self.unprompted_reply_every
+    }
+
+    pub fn notify_on_rejection(&self) -> bool {
+        self.notify_on_rejection
+    }
+
+    pub fn notify_on_error(&self) -> bool {
+        self.notify_on_error
+    }
+
+    pub fn notice_cooldown_secs(&self) -> u64 {
+        self.notice_cooldown_secs
     }
 
     pub fn react_probability(&self) -> f64 {
