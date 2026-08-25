@@ -6,4 +6,6 @@
 //! the public API or slow down `cargo doc`.
 
 pub mod channel_log;
+pub mod config;
+pub mod reply_filter;
 pub mod scrape;

@@ -1,23 +1,31 @@
-//! Two-step word filter for the bot's OWN outgoing chat replies.
+//! Two-step content filter for the bot's OWN outgoing chat replies.
 //!
 //! Step 1 is a cheap lexical screen against a deny-list of racist, harassing
-//! and disturbing terms. A reply with no hits passes immediately — the common
-//! case costs one string scan. The deny-list has two tiers:
+//! and disturbing terms:
 //!
 //! * HARD terms (unambiguous slurs, self-harm directives, hate slogans) have
-//!   no innocent use worth arbitrating — a hit rejects the reply outright.
+//!   no innocent use worth arbitrating — a hit rejects the reply outright
+//!   without spending a model call.
 //! * JUDGED terms ("chink", "rape", "coon"...) have innocent embeddings and
-//!   idioms, so step 2 hands the flagged text to a LOCAL judge model over
-//!   the OpenAI-compatible chat-completions API (ollama, llama.cpp server,
-//!   LM Studio, vLLM — anything that speaks that wire format). The shipped
-//!   judge is llama-guard3:1b, a purpose-built safety classifier answering
-//!   safe/unsafe; plain instruct models answering yes/no also work
-//!   (`filter.judge_kind`). Tested against llama3.2:1b as an instruct judge:
-//!   its verdicts were near-random — prefer a guard-class model.
+//!   idioms; a hit is recorded for the log line but the verdict is the
+//!   judge's.
+//!
+//! Step 2 is the AI judge, and since 2026-08-25 it runs for EVERY reply, not
+//! only lexically flagged ones — a deny-list can never enumerate all the ways
+//! a 1.1B model can produce something vile, so the guard model reads each
+//! outgoing message before it posts. The judge is a LOCAL model behind the
+//! OpenAI-compatible chat-completions API (ollama, llama.cpp server, LM
+//! Studio, vLLM — anything speaking that wire format). The shipped judge is
+//! llama-guard3:1b, a purpose-built safety classifier answering safe/unsafe;
+//! plain instruct models answering yes/no also work (`filter.judge_kind`).
+//! Tested against llama3.2:1b as an instruct judge: its verdicts were
+//! near-random — prefer a guard-class model.
 //!
 //! Fail-closed by design: no judge configured, judge unreachable, or an
-//! ambiguous answer all REJECT the flagged reply. The deny-list only ever
-//! sees the bot's own model output, not adversarial humans, so it aims for
+//! ambiguous answer all REJECT the reply — with the filter enabled the bot
+//! simply cannot speak unguarded (`!filter off` remains the admin escape
+//! hatch if the judge host is down for long). The deny-list only ever sees
+//! the bot's own model output, not adversarial humans, so it aims for
 //! severity, not evasion-proofing — profanity alone is deliberately absent
 //! (the persona swears; the guidelines are about racism, harassment and
 //! disturbing content, not crude language).
@@ -246,10 +254,10 @@ impl ReplyFilter {
         matches
     }
 
-    /// The full two-step screen. Lexically clean text passes without any
-    /// model traffic; hard-tier hits reject outright; judged-tier hits are
-    /// cleared only by an explicit "safe"/"no" from the judge — everything
-    /// else (no judge, judge down, ambiguous answer) rejects.
+    /// The full two-step screen. Hard-tier hits reject outright; EVERY other
+    /// reply — lexically flagged or not — is cleared only by an explicit
+    /// "safe"/"no" from the AI judge. Everything else (no judge, judge down,
+    /// ambiguous answer) rejects.
     pub async fn screen(&self, text: &str) -> ReplyScreen {
         if !self.is_enabled() {
             return ReplyScreen::Pass;
@@ -260,9 +268,6 @@ impl ReplyFilter {
                 matched: matches.hard,
                 reason: "hard deny-list term",
             };
-        }
-        if matches.judged.is_empty() {
-            return ReplyScreen::Pass;
         }
         let matched = matches.judged;
         let Some(judge) = &self.judge else {
@@ -472,11 +477,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn screen_passes_clean_and_disabled_text() {
-        let f = filter(true);
-        assert_eq!(f.screen("hello there").await, ReplyScreen::Pass);
+    async fn screen_disabled_passes_everything() {
         let off = filter(false);
         assert_eq!(off.screen("kill yourself").await, ReplyScreen::Pass);
+        assert_eq!(off.screen("hello there").await, ReplyScreen::Pass);
+    }
+
+    #[tokio::test]
+    async fn screen_judges_even_lexically_clean_text() {
+        // Every reply faces the judge now; with none configured that means
+        // rejection, clean text or not (fail-closed, empty match list).
+        let f = filter(true);
+        match f.screen("hello there").await {
+            ReplyScreen::Rejected { matched, reason } => {
+                assert!(matched.is_empty());
+                assert_eq!(reason, "no AI judge configured");
+            }
+            ReplyScreen::Pass => panic!("clean text must still face the judge"),
+        }
     }
 
     #[tokio::test]

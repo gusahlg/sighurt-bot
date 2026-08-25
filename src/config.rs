@@ -120,9 +120,9 @@ pub struct ChatConfig {
     pub react_probability: f64,
 }
 
-/// Two-step word filter over the bot's own outgoing chat replies: a lexical
-/// deny-list screen, then a local AI judge for anything the screen flags.
-/// See `reply_filter.rs` for the mechanics; this is just the wiring.
+/// Two-step content filter over the bot's own outgoing chat replies: a
+/// lexical deny-list screen, then a local AI judge for EVERY reply (not just
+/// lexically flagged ones). See `reply_filter.rs` for the mechanics.
 #[derive(Debug, Deserialize)]
 pub struct FilterConfig {
     /// Boot state of the runtime filter toggle (`!filter on|off` flips it at
