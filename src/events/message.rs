@@ -107,6 +107,10 @@ pub async fn handle_message(
                 handle_ai_command(cmd, message, http, chat).await;
                 return Ok(());
             }
+            if let Some(cmd) = parse_filter_word_command(&message.content) {
+                handle_filter_word_command(cmd, message, http, chat).await;
+                return Ok(());
+            }
             if let Some(cmd) = parse_toggle_command(&message.content, "!filter") {
                 handle_filter_command(cmd, message, http, chat).await;
                 return Ok(());
@@ -691,6 +695,87 @@ async fn handle_filter_command(
             filter.judge_description()
         ),
         cmd => toggle_reply("Word filter", cmd, |v| filter.set_enabled(v)),
+    };
+    post(http, message, &reply).await;
+}
+
+/// `!filter add <term>`, `!filter remove <term>`, `!filter words|list`. Term is
+/// everything after the verb (may contain spaces → a phrase).
+enum FilterWordCommand {
+    Add(String),
+    Remove(String),
+    List,
+}
+
+fn parse_filter_word_command(content: &str) -> Option<FilterWordCommand> {
+    let rest = content.trim().strip_prefix("!filter")?;
+    if !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let rest = rest.trim();
+    let (verb, term) = match rest.split_once(char::is_whitespace) {
+        Some((verb, term)) => (verb, term.trim()),
+        None => (rest, ""),
+    };
+    match verb.to_ascii_lowercase().as_str() {
+        "add" if !term.is_empty() => Some(FilterWordCommand::Add(term.to_string())),
+        "remove" | "rm" | "delete" if !term.is_empty() => {
+            Some(FilterWordCommand::Remove(term.to_string()))
+        }
+        "words" | "list" | "terms" => Some(FilterWordCommand::List),
+        _ => None,
+    }
+}
+
+async fn handle_filter_word_command(
+    cmd: FilterWordCommand,
+    message: &Message,
+    http: &Client,
+    chat: &ChatRuntime,
+) {
+    // Managing the deny-list mutates moderation, so it's admin-only (list too —
+    // the deny-list is not something to hand out publicly).
+    if !chat.has_admins() {
+        post(http, message, "The word filter is not configured (chat.admin_user_ids is empty).").await;
+        return;
+    }
+    if !chat.is_admin(message.author.id.get()) {
+        post(http, message, "You're not authorized to manage the word filter.").await;
+        return;
+    }
+    let filter = chat.filter();
+    let reply = match cmd {
+        FilterWordCommand::Add(term) => match filter.add_term(&term) {
+            crate::reply_filter::TermEdit::Added => format!("Added {term:?} to the deny-list."),
+            crate::reply_filter::TermEdit::AlreadyPresent => {
+                format!("{term:?} is already filtered.")
+            }
+            crate::reply_filter::TermEdit::NoWordsFile => {
+                "No filter.words_file is configured, so there's nowhere to save terms.".to_string()
+            }
+            _ => format!("Couldn't add {term:?}."),
+        },
+        FilterWordCommand::Remove(term) => match filter.remove_term(&term) {
+            crate::reply_filter::TermEdit::Removed => format!("Removed {term:?} from the deny-list."),
+            crate::reply_filter::TermEdit::NotFound => {
+                format!("{term:?} isn't in the admin deny-list.")
+            }
+            crate::reply_filter::TermEdit::BuiltIn => {
+                format!("{term:?} is a built-in term and can't be removed via command.")
+            }
+            crate::reply_filter::TermEdit::NoWordsFile => {
+                "No filter.words_file is configured.".to_string()
+            }
+            _ => format!("Couldn't remove {term:?}."),
+        },
+        FilterWordCommand::List => {
+            let terms = filter.extra_terms();
+            if terms.is_empty() {
+                "No admin-added filter terms yet (built-in terms aren't listed).".to_string()
+            } else {
+                format!("Admin-added filter terms ({}): {}", terms.len(), terms.join(", "))
+            }
+        }
     };
     post(http, message, &reply).await;
 }

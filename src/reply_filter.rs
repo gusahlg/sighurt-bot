@@ -34,9 +34,31 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde_json::json;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::RwLock;
 use std::time::Duration;
 
 use crate::config::FilterConfig;
+
+/// Outcome of an admin add/remove on the runtime deny-list.
+#[derive(Debug, PartialEq, Eq)]
+pub enum TermEdit {
+    Added,
+    Removed,
+    AlreadyPresent,
+    NotFound,
+    /// The term is a hard-coded built-in — refuse to touch it via chat.
+    BuiltIn,
+    /// No words_file is configured, so there's nowhere to persist edits.
+    NoWordsFile,
+}
+
+/// The admin-editable, file-backed portion of the deny-list (JUDGED tier).
+/// Built-in terms live in the consts below and are never mutated at runtime.
+#[derive(Default)]
+struct ExtraTerms {
+    tokens: HashSet<String>,
+    phrases: HashSet<String>,
+}
 
 /// HARD tier, matched anywhere in the text, even inside longer words.
 /// Reserved for terms with no innocent embedding (no Scunthorpe risk).
@@ -122,40 +144,55 @@ pub struct ReplyFilter {
     hard_phrases: Vec<String>,
     judged_tokens: HashSet<String>,
     judged_phrases: Vec<String>,
+    /// Admin-added terms, mutable at runtime and persisted to `words_file`.
+    extra: RwLock<ExtraTerms>,
+    words_file: Option<String>,
     judge: Option<JudgeClient>,
 }
 
 impl ReplyFilter {
     pub fn from_config(cfg: &FilterConfig) -> Result<Self> {
-        let mut judged_tokens: HashSet<String> =
+        let judged_tokens: HashSet<String> =
             JUDGED_TOKEN_TERMS.iter().map(|t| t.to_string()).collect();
         let mut judged_phrases: Vec<String> =
             JUDGED_PHRASES.iter().map(|t| t.to_string()).collect();
+        judged_phrases.sort();
+        judged_phrases.dedup();
 
         // Optional admin-extendable deny-list: one lowercase term per line,
-        // `#` comments. File terms land in the JUDGED tier (the judge can
-        // still rescue idioms; hard terms stay curated in code). Terms with
-        // whitespace become phrases, single words token terms. Missing file
-        // is a loud warning, not a fatal — a typo'd path must not keep the
-        // bot down.
-        if let Some(path) = cfg.words_file.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        // `#` comments. File terms land in the mutable JUDGED `extra` set so
+        // admins can add/remove them at runtime via `!filter add|remove` and
+        // the change persists. Terms with whitespace become phrases, single
+        // words token terms. Missing file is a loud warning, not fatal — a
+        // typo'd path must not keep the bot down.
+        let words_file = cfg
+            .words_file
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(str::to_string);
+        let mut extra = ExtraTerms::default();
+        if let Some(path) = words_file.as_deref() {
             match std::fs::read_to_string(path) {
                 Ok(content) => {
-                    let mut added = 0usize;
                     for line in content.lines() {
                         let term = line.trim().to_lowercase();
                         if term.is_empty() || term.starts_with('#') {
                             continue;
                         }
                         if term.split_whitespace().count() > 1 {
-                            judged_phrases
-                                .push(term.split_whitespace().collect::<Vec<_>>().join(" "));
+                            extra
+                                .phrases
+                                .insert(term.split_whitespace().collect::<Vec<_>>().join(" "));
                         } else {
-                            judged_tokens.insert(term);
+                            extra.tokens.insert(term);
                         }
-                        added += 1;
                     }
-                    tracing::info!("Loaded {} extra filter terms from {}", added, path);
+                    tracing::info!(
+                        "Loaded {} extra filter terms from {}",
+                        extra.tokens.len() + extra.phrases.len(),
+                        path
+                    );
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -166,8 +203,6 @@ impl ReplyFilter {
                 }
             }
         }
-        judged_phrases.sort();
-        judged_phrases.dedup();
 
         let judge = match cfg.judge_url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
             Some(url) => Some(JudgeClient::new(
@@ -186,8 +221,100 @@ impl ReplyFilter {
             hard_phrases: HARD_PHRASES.iter().map(|t| t.to_string()).collect(),
             judged_tokens,
             judged_phrases,
+            extra: RwLock::new(extra),
+            words_file,
             judge,
         })
+    }
+
+    /// Is `term` a built-in JUDGED/HARD term (curated in code, not removable)?
+    fn is_built_in(&self, term: &str) -> bool {
+        let token = term.split_whitespace().collect::<Vec<_>>().join(" ");
+        self.judged_tokens.contains(term)
+            || self.judged_phrases.iter().any(|p| p == &token)
+            || self.hard_tokens.contains(term)
+            || self.hard_substrings.iter().any(|t| t == term)
+            || self.hard_phrases.iter().any(|p| p == &token)
+    }
+
+    /// Admin: add a term to the runtime deny-list (JUDGED tier) and persist it.
+    pub fn add_term(&self, raw: &str) -> TermEdit {
+        let term = raw.trim().to_lowercase();
+        if term.is_empty() {
+            return TermEdit::NotFound;
+        }
+        if self.words_file.is_none() {
+            return TermEdit::NoWordsFile;
+        }
+        if self.is_built_in(&term) {
+            return TermEdit::AlreadyPresent;
+        }
+        let is_phrase = term.split_whitespace().count() > 1;
+        let normalized = term.split_whitespace().collect::<Vec<_>>().join(" ");
+        {
+            let mut extra = self.extra.write().expect("filter extra lock poisoned");
+            let inserted = if is_phrase {
+                extra.phrases.insert(normalized)
+            } else {
+                extra.tokens.insert(normalized)
+            };
+            if !inserted {
+                return TermEdit::AlreadyPresent;
+            }
+        }
+        self.persist();
+        TermEdit::Added
+    }
+
+    /// Admin: remove an admin-added term. Built-ins are refused.
+    pub fn remove_term(&self, raw: &str) -> TermEdit {
+        let term = raw.trim().to_lowercase();
+        let normalized = term.split_whitespace().collect::<Vec<_>>().join(" ");
+        if normalized.is_empty() {
+            return TermEdit::NotFound;
+        }
+        {
+            let mut extra = self.extra.write().expect("filter extra lock poisoned");
+            let removed = extra.tokens.remove(&normalized) | extra.phrases.remove(&normalized);
+            if !removed {
+                return if self.is_built_in(&normalized) {
+                    TermEdit::BuiltIn
+                } else {
+                    TermEdit::NotFound
+                };
+            }
+        }
+        self.persist();
+        TermEdit::Removed
+    }
+
+    /// The admin-added terms, sorted, for `!filter words`.
+    pub fn extra_terms(&self) -> Vec<String> {
+        let extra = self.extra.read().expect("filter extra lock poisoned");
+        let mut all: Vec<String> = extra.tokens.iter().chain(extra.phrases.iter()).cloned().collect();
+        all.sort();
+        all
+    }
+
+    /// Rewrite the words_file from the current extra set (crash-safe via a
+    /// temp sibling + rename). Best-effort: a write failure is logged, and the
+    /// in-memory edit still applies for this process.
+    fn persist(&self) {
+        let Some(path) = self.words_file.as_deref() else {
+            return;
+        };
+        let mut body = String::from(
+            "# SuperSighurt runtime deny-list (JUDGED tier). Managed by `!filter add|remove`.\n\
+             # One term per line; multi-word lines are phrases. Edited live by admins.\n",
+        );
+        for term in self.extra_terms() {
+            body.push_str(&term);
+            body.push('\n');
+        }
+        let tmp = format!("{path}.tmp");
+        if let Err(e) = std::fs::write(&tmp, &body).and_then(|_| std::fs::rename(&tmp, path)) {
+            tracing::warn!("failed to persist filter words_file {}: {}", path, e);
+        }
     }
 
     pub fn is_enabled(&self) -> bool {
@@ -209,10 +336,11 @@ impl ReplyFilter {
 
     pub fn boot_summary(&self) -> String {
         format!(
-            "Reply filter: {} ({} hard terms, {} judged terms; judge: {})",
+            "Reply filter: {} ({} hard terms, {} judged terms, {} admin-added; judge: {})",
             if self.is_enabled() { "ON" } else { "OFF" },
             self.hard_substrings.len() + self.hard_tokens.len() + self.hard_phrases.len(),
             self.judged_tokens.len() + self.judged_phrases.len(),
+            self.extra_terms().len(),
             self.judge_description()
         )
     }
@@ -223,6 +351,7 @@ impl ReplyFilter {
     /// the digits of the latter.
     pub fn lexical_matches(&self, text: &str) -> LexicalMatches {
         let mut matches = LexicalMatches::default();
+        let extra = self.extra.read().expect("filter extra lock poisoned");
         for folded in [fold(text, false), fold(text, true)] {
             for term in &self.hard_substrings {
                 if folded.contains(term.as_str()) {
@@ -239,14 +368,20 @@ impl ReplyFilter {
                     matches.judged.push(phrase.clone());
                 }
             }
+            for phrase in &extra.phrases {
+                if folded.contains(phrase.as_str()) {
+                    matches.judged.push(phrase.clone());
+                }
+            }
             for token in folded.split(' ') {
                 if self.hard_tokens.contains(token) {
                     matches.hard.push(token.to_string());
-                } else if self.judged_tokens.contains(token) {
+                } else if self.judged_tokens.contains(token) || extra.tokens.contains(token) {
                     matches.judged.push(token.to_string());
                 }
             }
         }
+        drop(extra);
         matches.hard.sort();
         matches.hard.dedup();
         matches.judged.sort();
@@ -541,6 +676,43 @@ mod tests {
         );
         // A term embedded in a longer word stays token-tier (no flag).
         assert_eq!(f.lexical_matches("zorbleblattery"), LexicalMatches::default());
+    }
+
+    #[test]
+    fn admin_add_and_remove_terms_persist_and_match() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("filter_admin_test_{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let cfg = FilterConfig {
+            words_file: Some(path.to_string_lossy().into_owned()),
+            ..FilterConfig::default()
+        };
+        let f = ReplyFilter::from_config(&cfg).unwrap();
+        // Add a token term -> it now flags, and it survives a reload from file.
+        assert_eq!(f.add_term("zorbleblat"), TermEdit::Added);
+        assert_eq!(f.add_term("zorbleblat"), TermEdit::AlreadyPresent);
+        assert_eq!(f.lexical_matches("total zorbleblat energy").judged, vec!["zorbleblat"]);
+        assert!(f.extra_terms().contains(&"zorbleblat".to_string()));
+        let reloaded = ReplyFilter::from_config(&cfg).unwrap();
+        assert_eq!(reloaded.lexical_matches("a zorbleblat").judged, vec!["zorbleblat"]);
+        // A multi-word add becomes a phrase.
+        assert_eq!(reloaded.add_term("frobnicate the cat"), TermEdit::Added);
+        assert_eq!(
+            reloaded.lexical_matches("please frobnicate  the CAT").judged,
+            vec!["frobnicate the cat"]
+        );
+        // Remove works; built-ins are refused; unknown reports NotFound.
+        assert_eq!(reloaded.remove_term("zorbleblat"), TermEdit::Removed);
+        assert!(reloaded.lexical_matches("a zorbleblat").judged.is_empty());
+        assert_eq!(reloaded.remove_term("rape"), TermEdit::BuiltIn);
+        assert_eq!(reloaded.remove_term("neverwashere"), TermEdit::NotFound);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn add_without_words_file_reports_no_file() {
+        let f = filter(true); // default config has no words_file
+        assert_eq!(f.add_term("whatever"), TermEdit::NoWordsFile);
     }
 
     #[test]

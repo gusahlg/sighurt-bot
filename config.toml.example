@@ -79,4 +79,5 @@ enabled = true
 judge_timeout_secs = 45
 # Optional extra deny-list terms, one lowercase term per line, `#` comments.
 # Multi-word lines match as phrases, single words as whole tokens.
-# words_file = "data/filter_words.txt"
+# Admin-editable deny-list, managed live via `!filter add|remove|words`.
+words_file = "data/filter_words.txt"
