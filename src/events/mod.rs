@@ -49,9 +49,10 @@ pub async fn handle_event(
         Event::InteractionCreate(interaction) => {
             let http = Arc::clone(&http);
             let pool = pool.clone();
+            let chat = chat.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = commands::handle_interaction(interaction.0, http, pool).await {
+                if let Err(e) = commands::handle_interaction(interaction.0, http, pool, chat).await {
                     tracing::error!("Error handling interaction: {}", e);
                 }
             });

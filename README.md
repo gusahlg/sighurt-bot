@@ -10,8 +10,8 @@ full single-machine architecture).
 
 ### AI Chat (SuperSighurt)
 - Answers **DMs and @-mentions** by calling the local LLM server
-  (`[chat] endpoint_url`, X-API-Key auth). `!ai on|off|status` toggles it
-  at runtime for the configured admins.
+  (`[chat] endpoint_url`, X-API-Key auth). `/ai on|off|status` toggles it
+  at runtime (Administrator-gated).
 - **Understands Discord replies**: when someone replies to a message
   (the bot's or anyone's), the replied-to author + text are sent to the
   LLM as context, and the bot's answer is posted as a real Discord reply.
@@ -32,17 +32,19 @@ full single-machine architecture).
   to a real `<@id>` ping. Everything else is ping-suppressed via a
   strict `allowed_mentions` (the global default suppresses ALL pings —
   no accidental `@everyone`).
-- **Outgoing word filter** (`[filter]`, `!filter on|off|status` for the same
-  admins as `!ai`): every reply the bot is about to post is screened in two
-  steps — a lexical deny-list of racist/harassment/disturbing terms (persona
-  profanity is deliberately not filtered), then a **local AI judge** (any
-  OpenAI-compatible endpoint; production uses ollama with `llama-guard3:1b`,
-  a purpose-built safety classifier) that decides whether a lexically flagged
-  reply actually breaks the guidelines. Unambiguous terms (slurs, self-harm
-  directives, hate slogans) skip the judge and reject outright. Fail-closed:
-  no judge or judge down means flagged replies are dropped. A rejected reply is
-  never posted; the person being replied to is told privately (DM) that the
-  reply was withheld — the channel sees nothing.
+- **Outgoing reply filter / self-moderation** (`[filter]`,
+  `/moderation on|off|status`, Administrator-gated). **Off by default** — Sig
+  speaks unfiltered until an Administrator turns it on. When on, every reply
+  the bot is about to post is screened in two steps — a lexical deny-list of
+  racist/harassment/disturbing terms (persona profanity is deliberately not
+  filtered; manage the admin-added terms with `/filterword add|remove|list`),
+  then a **local AI judge** (any OpenAI-compatible endpoint; production uses
+  ollama with `llama-guard3:1b`, a purpose-built safety classifier) that
+  decides whether a flagged reply actually breaks the guidelines. Unambiguous
+  terms (slurs, self-harm directives, hate slogans) skip the judge and reject
+  outright. Fail-closed: no judge or judge down means flagged replies are
+  dropped. A rejected reply is never posted; the person being replied to is
+  told privately (DM) that the reply was withheld — the channel sees nothing.
 
 ### Training-data capture
 - Logs **every message in every server** (humans and bots) to
@@ -69,9 +71,17 @@ full single-machine architecture).
 | Command | Description | Permission |
 |---------|-------------|------------|
 | `/ping` | Check if the bot is responsive | Everyone |
+| `/help` | List the commands and who can use them | Everyone |
 | `/userinfo [user]` | Get information about a user | Everyone |
 | `/serverinfo` | Get information about the server | Everyone |
-| `/say <message>` | Temporarily disabled during AI testing | Manage Messages |
+| `/say <message>` | Post a message attributed to you (`<you>: <message>`) | Everyone |
+
+### Sig Controls
+| Command | Description | Permission |
+|---------|-------------|------------|
+| `/ai on\|off\|status` | Toggle AI chat responses (status is open to all) | Administrator |
+| `/moderation on\|off\|status` | Toggle Sig's reply filter / self-moderation (off by default) | Administrator |
+| `/filterword add\|remove\|list` | Manage the reply-filter deny-list terms | Administrator |
 
 ### Auto-Moderation
 | Command | Description | Permission |
@@ -429,4 +439,13 @@ The release build is optimized with LTO and stripped symbols for minimal size.
 
 ## License
 
-MIT
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option. Copyright (c) 2026 gusahlg / SuperSighurt contributors.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in this work by you, as defined in the Apache-2.0 license, shall
+be dual licensed as above, without any additional terms or conditions.

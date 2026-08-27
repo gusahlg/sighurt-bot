@@ -3,6 +3,7 @@ name = "discord-bot"
 version = "0.1.0"
 edition = "2021"
 description = "A Discord moderation bot using Twilight, optimized for Raspberry Pi"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 # Twilight Discord framework (minimal features)

@@ -59,7 +59,8 @@ pub struct AiModeConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChatConfig {
     /// Initial state of the runtime AI toggle. The toggle can be flipped at
-    /// runtime via the `!ai on|off` admin command; this is just the boot value.
+    /// runtime via the Administrator-gated `/ai on|off` slash command; this is
+    /// just the boot value.
     #[serde(default)]
     pub enabled: bool,
     /// URL of the LLM HTTP server (e.g. http://100.118.41.103:8088).
@@ -68,8 +69,10 @@ pub struct ChatConfig {
     /// Per-request HTTP timeout.
     #[serde(default = "default_chat_timeout")]
     pub request_timeout_secs: u64,
-    /// Discord user IDs allowed to run `!ai on|off|status`. Empty disables the
-    /// command entirely — leave empty if you don't want runtime toggling.
+    /// Legacy: Discord user IDs that used to gate the old `!ai`/`!filter` text
+    /// commands. Those toggles are now the Administrator-gated `/ai`,
+    /// `/moderation` and `/filterword` slash commands, so this field no longer
+    /// controls them. Kept for backward compatibility / other uses.
     #[serde(default)]
     pub admin_user_ids: Vec<u64>,
     /// Whether other bots' DMs/@-mentions may trigger a chat reply. Our own
@@ -138,9 +141,10 @@ pub struct ChatConfig {
 /// lexically flagged ones). See `reply_filter.rs` for the mechanics.
 #[derive(Debug, Deserialize)]
 pub struct FilterConfig {
-    /// Boot state of the runtime filter toggle (`!filter on|off` flips it at
-    /// runtime, same admin allowlist as `!ai`).
-    #[serde(default = "default_true")]
+    /// Boot state of the runtime filter toggle. Defaults to OFF: Sig speaks
+    /// unfiltered unless an Administrator turns the filter on with
+    /// `/moderation on` (which flips this at runtime — see reply_filter.rs).
+    #[serde(default)]
     pub enabled: bool,
     /// OpenAI-compatible chat-completions URL of a LOCAL judge model, e.g.
     /// ollama's `http://127.0.0.1:11434/v1/chat/completions`. Anything that
@@ -355,7 +359,7 @@ impl Default for ChatConfig {
 impl Default for FilterConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             judge_url: None,
             judge_model: None,
             judge_kind: default_judge_kind(),
@@ -706,7 +710,9 @@ mod tests {
     #[test]
     fn test_filter_config_default() {
         let config = FilterConfig::default();
-        assert!(config.enabled);
+        // Reply filter is OFF by default now (Sig speaks unfiltered until an
+        // Administrator turns it on via /moderation on).
+        assert!(!config.enabled);
         assert!(config.judge_url.is_none());
         assert!(config.judge_model.is_none());
         assert_eq!(config.judge_kind, "guard");
@@ -730,9 +736,9 @@ mod tests {
         );
         assert_eq!(config.filter.judge_model.as_deref(), Some("llama-guard3:1b"));
         assert!(config.validate().is_ok());
-        // Absent section falls back to defaults (filter ON, no judge).
+        // Absent section falls back to defaults (filter OFF, no judge).
         let config: Config = toml::from_str("").unwrap();
-        assert!(config.filter.enabled);
+        assert!(!config.filter.enabled);
         assert!(config.filter.judge_url.is_none());
     }
 

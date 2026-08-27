@@ -5,21 +5,19 @@ use crate::reply_filter::ReplyFilter;
 use crate::web_search::{WebSearchClient, WebSearchContext};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
-use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Wraps a `ChatClient` with a runtime on/off toggle and an admin allowlist.
+/// Wraps a `ChatClient` with a runtime on/off toggle.
 ///
-/// The toggle is an `AtomicBool` so the `!ai on|off` command can flip it without
-/// needing a lock or a config reload. Admin IDs are checked against the message
-/// author for that command — if the set is empty, the command is disabled (you
-/// must opt in by listing at least one user in `[chat].admin_user_ids`).
+/// The toggle is an `AtomicBool` so the `/ai on|off` slash command can flip it
+/// without needing a lock or a config reload. Authorization for that command
+/// (and `/moderation`, `/filterword`) is the Discord **Administrator**
+/// permission, enforced in the command handlers — not an allowlist here.
 pub struct ChatRuntime {
     client: ChatClient,
     enabled: AtomicBool,
-    admin_user_ids: HashSet<u64>,
     respond_to_bots: bool,
     max_bot_chain: u32,
     reply_context_max_chars: usize,
@@ -45,7 +43,6 @@ impl ChatRuntime {
         Arc::new(Self {
             client,
             enabled: AtomicBool::new(cfg.enabled),
-            admin_user_ids: cfg.admin_user_ids.iter().copied().collect(),
             respond_to_bots: cfg.respond_to_bots,
             max_bot_chain: cfg.max_bot_chain,
             reply_context_max_chars: cfg.reply_context_max_chars,
@@ -68,14 +65,6 @@ impl ChatRuntime {
     /// Returns the previous value.
     pub fn set_enabled(&self, value: bool) -> bool {
         self.enabled.swap(value, Ordering::Relaxed)
-    }
-
-    pub fn is_admin(&self, user_id: u64) -> bool {
-        self.admin_user_ids.contains(&user_id)
-    }
-
-    pub fn has_admins(&self) -> bool {
-        !self.admin_user_ids.is_empty()
     }
 
     pub fn respond_to_bots(&self) -> bool {

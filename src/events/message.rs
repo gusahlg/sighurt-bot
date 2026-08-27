@@ -99,23 +99,10 @@ pub async fn handle_message(
             }
         }
 
-        // Admin command path: `!ai on|off|status` and `!filter on|off|status`.
-        // Handled before the DM/mention gate so admins can toggle from any
-        // channel without @-mentioning the bot.
-        if let Some(chat) = chat {
-            if let Some(cmd) = parse_toggle_command(&message.content, "!ai") {
-                handle_ai_command(cmd, message, http, chat).await;
-                return Ok(());
-            }
-            if let Some(cmd) = parse_filter_word_command(&message.content) {
-                handle_filter_word_command(cmd, message, http, chat).await;
-                return Ok(());
-            }
-            if let Some(cmd) = parse_toggle_command(&message.content, "!filter") {
-                handle_filter_command(cmd, message, http, chat).await;
-                return Ok(());
-            }
-        }
+        // The `!ai` / `!filter` text commands are gone: those runtime toggles
+        // now live in the Administrator-gated `/ai`, `/moderation` and
+        // `/filterword` slash commands (see `commands/`), which use the real
+        // Discord Administrator permission instead of a hardcoded allowlist.
 
         // Voice command path: `!voice join|leave|status`. Same any-channel
         // ergonomics as `!ai`; voice runs entirely server-side so there's no
@@ -586,200 +573,6 @@ fn extract_unicode_emoji(reply: &str) -> Option<String> {
     None
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ToggleCommand {
-    On,
-    Off,
-    Status,
-}
-
-/// Parse `<name> [on|off|status]` commands (`!ai`, `!filter`). Bare `<name>`
-/// reads as status.
-fn parse_toggle_command(content: &str, name: &str) -> Option<ToggleCommand> {
-    let trimmed = content.trim();
-    let rest = trimmed.strip_prefix(name)?;
-    // Require word boundary after the name so `!aim` and similar don't match.
-    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
-        return None;
-    }
-    match rest.trim().to_ascii_lowercase().as_str() {
-        "on" | "enable" => Some(ToggleCommand::On),
-        "off" | "disable" => Some(ToggleCommand::Off),
-        "status" | "" => Some(ToggleCommand::Status),
-        _ => None,
-    }
-}
-
-/// Admin gate shared by the runtime toggles. Status is read-only and open to
-/// everyone; On/Off mutate state and require an admin allowlist entry. Posts
-/// the refusal itself and returns whether the caller may proceed.
-async fn toggle_authorized(
-    cmd: ToggleCommand,
-    what: &str,
-    message: &Message,
-    http: &Client,
-    chat: &ChatRuntime,
-) -> bool {
-    if matches!(cmd, ToggleCommand::Status) {
-        return true;
-    }
-    if !chat.has_admins() {
-        let text = format!(
-            "The {what} toggle is not configured (chat.admin_user_ids is empty in config.toml)."
-        );
-        post(http, message, &text).await;
-        return false;
-    }
-    if !chat.is_admin(message.author.id.get()) {
-        post(http, message, &format!("You're not authorized to toggle {what}.")).await;
-        return false;
-    }
-    true
-}
-
-/// Render the reply for a toggle that was applied: `set` returns the previous
-/// state, so "already ON/OFF" falls out of comparing it with the request.
-fn toggle_reply(what: &str, cmd: ToggleCommand, was_on: impl FnOnce(bool) -> bool) -> String {
-    match cmd {
-        ToggleCommand::On => {
-            if was_on(true) {
-                format!("{what} is already ON.")
-            } else {
-                format!("{what}: ON.")
-            }
-        }
-        ToggleCommand::Off => {
-            if was_on(false) {
-                format!("{what}: OFF.")
-            } else {
-                format!("{what} is already OFF.")
-            }
-        }
-        ToggleCommand::Status => unreachable!("status renders its own reply"),
-    }
-}
-
-async fn handle_ai_command(
-    cmd: ToggleCommand,
-    message: &Message,
-    http: &Client,
-    chat: &ChatRuntime,
-) {
-    if !toggle_authorized(cmd, "AI mode", message, http, chat).await {
-        return;
-    }
-    let reply = match cmd {
-        ToggleCommand::Status => format!(
-            "AI mode: {}.",
-            if chat.is_enabled() { "ON" } else { "OFF" }
-        ),
-        cmd => toggle_reply("AI mode", cmd, |v| chat.set_enabled(v)),
-    };
-    post(http, message, &reply).await;
-}
-
-async fn handle_filter_command(
-    cmd: ToggleCommand,
-    message: &Message,
-    http: &Client,
-    chat: &ChatRuntime,
-) {
-    if !toggle_authorized(cmd, "the word filter", message, http, chat).await {
-        return;
-    }
-    let filter = chat.filter();
-    let reply = match cmd {
-        ToggleCommand::Status => format!(
-            "Word filter: {}. AI judge: {}.",
-            if filter.is_enabled() { "ON" } else { "OFF" },
-            filter.judge_description()
-        ),
-        cmd => toggle_reply("Word filter", cmd, |v| filter.set_enabled(v)),
-    };
-    post(http, message, &reply).await;
-}
-
-/// `!filter add <term>`, `!filter remove <term>`, `!filter words|list`. Term is
-/// everything after the verb (may contain spaces → a phrase).
-enum FilterWordCommand {
-    Add(String),
-    Remove(String),
-    List,
-}
-
-fn parse_filter_word_command(content: &str) -> Option<FilterWordCommand> {
-    let rest = content.trim().strip_prefix("!filter")?;
-    if !rest.starts_with(char::is_whitespace) {
-        return None;
-    }
-    let rest = rest.trim();
-    let (verb, term) = match rest.split_once(char::is_whitespace) {
-        Some((verb, term)) => (verb, term.trim()),
-        None => (rest, ""),
-    };
-    match verb.to_ascii_lowercase().as_str() {
-        "add" if !term.is_empty() => Some(FilterWordCommand::Add(term.to_string())),
-        "remove" | "rm" | "delete" if !term.is_empty() => {
-            Some(FilterWordCommand::Remove(term.to_string()))
-        }
-        "words" | "list" | "terms" => Some(FilterWordCommand::List),
-        _ => None,
-    }
-}
-
-async fn handle_filter_word_command(
-    cmd: FilterWordCommand,
-    message: &Message,
-    http: &Client,
-    chat: &ChatRuntime,
-) {
-    // Managing the deny-list mutates moderation, so it's admin-only (list too —
-    // the deny-list is not something to hand out publicly).
-    if !chat.has_admins() {
-        post(http, message, "The word filter is not configured (chat.admin_user_ids is empty).").await;
-        return;
-    }
-    if !chat.is_admin(message.author.id.get()) {
-        post(http, message, "You're not authorized to manage the word filter.").await;
-        return;
-    }
-    let filter = chat.filter();
-    let reply = match cmd {
-        FilterWordCommand::Add(term) => match filter.add_term(&term) {
-            crate::reply_filter::TermEdit::Added => format!("Added {term:?} to the deny-list."),
-            crate::reply_filter::TermEdit::AlreadyPresent => {
-                format!("{term:?} is already filtered.")
-            }
-            crate::reply_filter::TermEdit::NoWordsFile => {
-                "No filter.words_file is configured, so there's nowhere to save terms.".to_string()
-            }
-            _ => format!("Couldn't add {term:?}."),
-        },
-        FilterWordCommand::Remove(term) => match filter.remove_term(&term) {
-            crate::reply_filter::TermEdit::Removed => format!("Removed {term:?} from the deny-list."),
-            crate::reply_filter::TermEdit::NotFound => {
-                format!("{term:?} isn't in the admin deny-list.")
-            }
-            crate::reply_filter::TermEdit::BuiltIn => {
-                format!("{term:?} is a built-in term and can't be removed via command.")
-            }
-            crate::reply_filter::TermEdit::NoWordsFile => {
-                "No filter.words_file is configured.".to_string()
-            }
-            _ => format!("Couldn't remove {term:?}."),
-        },
-        FilterWordCommand::List => {
-            let terms = filter.extra_terms();
-            if terms.is_empty() {
-                "No admin-added filter terms yet (built-in terms aren't listed).".to_string()
-            } else {
-                format!("Admin-added filter terms ({}): {}", terms.len(), terms.join(", "))
-            }
-        }
-    };
-    post(http, message, &reply).await;
-}
-
 /// Tell ONLY the person the bot was replying to that the reply was withheld.
 /// Guild triggers get a DM (the channel itself never sees a trace); DM
 /// triggers are already private, so the notice lands right there. Best-effort:
@@ -815,17 +608,6 @@ potentially contained text that is against the guidelines.";
             }
         }
         Err(e) => tracing::debug!("Invalid rejection notice content: {}", e),
-    }
-}
-
-async fn post(http: &Client, message: &Message, text: &str) {
-    match http.create_message(message.channel_id).content(text) {
-        Ok(builder) => {
-            if let Err(e) = builder.await {
-                tracing::warn!("Failed to post AI command reply: {}", e);
-            }
-        }
-        Err(e) => tracing::warn!("Invalid AI command reply content: {}", e),
     }
 }
 
@@ -1380,54 +1162,6 @@ mod tests {
             name: name.to_string(),
             public_flags: UserFlags::empty(),
         }
-    }
-
-    #[test]
-    fn parse_toggle_command_matches() {
-        let parse = |content| parse_toggle_command(content, "!ai");
-        assert_eq!(parse("!ai on"), Some(ToggleCommand::On));
-        assert_eq!(parse("  !ai   ON  "), Some(ToggleCommand::On));
-        assert_eq!(parse("!ai off"), Some(ToggleCommand::Off));
-        assert_eq!(parse("!ai enable"), Some(ToggleCommand::On));
-        assert_eq!(parse("!ai disable"), Some(ToggleCommand::Off));
-        assert_eq!(parse("!ai status"), Some(ToggleCommand::Status));
-        assert_eq!(parse("!ai"), Some(ToggleCommand::Status));
-        // The same parser drives `!filter`.
-        assert_eq!(
-            parse_toggle_command("!filter off", "!filter"),
-            Some(ToggleCommand::Off)
-        );
-        assert_eq!(
-            parse_toggle_command("!filter", "!filter"),
-            Some(ToggleCommand::Status)
-        );
-    }
-
-    #[test]
-    fn parse_toggle_command_rejects_non_matches() {
-        let parse = |content| parse_toggle_command(content, "!ai");
-        assert_eq!(parse("!aim for the moon"), None);
-        assert_eq!(parse("ai on"), None);
-        assert_eq!(parse("!ai bogus"), None);
-        assert_eq!(parse("hello !ai on"), None);
-        assert_eq!(parse_toggle_command("!filtering", "!filter"), None);
-    }
-
-    #[test]
-    fn toggle_reply_reports_state_transitions() {
-        assert_eq!(toggle_reply("AI mode", ToggleCommand::On, |_| false), "AI mode: ON.");
-        assert_eq!(
-            toggle_reply("AI mode", ToggleCommand::On, |_| true),
-            "AI mode is already ON."
-        );
-        assert_eq!(
-            toggle_reply("Word filter", ToggleCommand::Off, |_| true),
-            "Word filter: OFF."
-        );
-        assert_eq!(
-            toggle_reply("Word filter", ToggleCommand::Off, |_| false),
-            "Word filter is already OFF."
-        );
     }
 
     #[test]

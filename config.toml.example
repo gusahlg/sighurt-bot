@@ -24,15 +24,15 @@ default_delete_days = 1
 [chat]
 # Forward DMs and @-mentions to the SuperSighurt LLM and reply with the result.
 # The LLM_API_KEY env var (in the bot's .env file) carries the shared secret.
-# `enabled` is the initial state of the runtime toggle — admins listed below
-# can flip it without restarting the bot via `!ai on`, `!ai off`, `!ai status`.
+# `enabled` is the initial state of the runtime toggle — Administrators can
+# flip it without restarting via the `/ai on|off|status` slash command.
 enabled = true
 # The production stack is co-located; keep model traffic on loopback.
 endpoint_url = "http://127.0.0.1:8088"
 # Per-request HTTP timeout.
 request_timeout_secs = 90
-# Discord user IDs allowed to run `!ai on|off`. Leave empty to disable the
-# command entirely (status is still readable by anyone).
+# Legacy field. The `/ai`, `/moderation` and `/filterword` controls are now
+# gated on the Discord Administrator permission, not this list.
 admin_user_ids = []
 # Minimum seconds between chat replies per channel (flood/DoS guard on the chat
 # trigger; DMs aren't covered by automod). Must be > 0. Defaults to 2.
@@ -61,9 +61,9 @@ notice_cooldown_secs = 30
 # is not filtered), then an AI judge for anything the screen flags — so a
 # trigger word inside a harmless sentence doesn't censor the reply. Rejected
 # replies are never posted; only the person being replied to is notified,
-# privately. `enabled` is the boot state of the runtime toggle — the admins
-# in chat.admin_user_ids can flip it via `!filter on|off|status`.
-enabled = true
+# privately. `enabled` is the boot state of the runtime toggle — default OFF;
+# an Administrator turns it on with `/moderation on|off|status`.
+enabled = false
 # LOCAL judge model behind an OpenAI-compatible chat-completions endpoint —
 # ollama (`http://127.0.0.1:11434/v1/chat/completions`), llama.cpp server,
 # LM Studio, vLLM all work. The filter is fail-closed: with judge_url unset,
@@ -79,5 +79,5 @@ enabled = true
 judge_timeout_secs = 45
 # Optional extra deny-list terms, one lowercase term per line, `#` comments.
 # Multi-word lines match as phrases, single words as whole tokens.
-# Admin-editable deny-list, managed live via `!filter add|remove|words`.
+# Admin-editable deny-list, managed live via `/filterword add|remove|list`.
 words_file = "data/filter_words.txt"

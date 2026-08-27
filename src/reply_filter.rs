@@ -23,7 +23,7 @@
 //!
 //! Fail-closed by design: no judge configured, judge unreachable, or an
 //! ambiguous answer all REJECT the reply — with the filter enabled the bot
-//! simply cannot speak unguarded (`!filter off` remains the admin escape
+//! simply cannot speak unguarded (`/moderation off` remains the admin escape
 //! hatch if the judge host is down for long). The deny-list only ever sees
 //! the bot's own model output, not adversarial humans, so it aims for
 //! severity, not evasion-proofing — profanity alone is deliberately absent
@@ -237,6 +237,7 @@ impl ReplyFilter {
             || self.hard_phrases.iter().any(|p| p == &token)
     }
 
+    // Admin term management is driven by the `/filterword` slash command.
     /// Admin: add a term to the runtime deny-list (JUDGED tier) and persist it.
     pub fn add_term(&self, raw: &str) -> TermEdit {
         let term = raw.trim().to_lowercase();
@@ -288,7 +289,7 @@ impl ReplyFilter {
         TermEdit::Removed
     }
 
-    /// The admin-added terms, sorted, for `!filter words`.
+    /// The admin-added terms, sorted, for `/filterword list`.
     pub fn extra_terms(&self) -> Vec<String> {
         let extra = self.extra.read().expect("filter extra lock poisoned");
         let mut all: Vec<String> = extra.tokens.iter().chain(extra.phrases.iter()).cloned().collect();
@@ -304,7 +305,7 @@ impl ReplyFilter {
             return;
         };
         let mut body = String::from(
-            "# SuperSighurt runtime deny-list (JUDGED tier). Managed by `!filter add|remove`.\n\
+            "# SuperSighurt runtime deny-list (JUDGED tier). Managed by `/filterword add|remove`.\n\
              # One term per line; multi-word lines are phrases. Edited live by admins.\n",
         );
         for term in self.extra_terms() {
