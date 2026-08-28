@@ -20,6 +20,7 @@ pub struct ChatRuntime {
     enabled: AtomicBool,
     respond_to_bots: bool,
     max_bot_chain: u32,
+    reply_queue_limit: u32,
     reply_context_max_chars: usize,
     recent_context_messages: usize,
     context_message_max_chars: usize,
@@ -45,6 +46,7 @@ impl ChatRuntime {
             enabled: AtomicBool::new(cfg.enabled),
             respond_to_bots: cfg.respond_to_bots,
             max_bot_chain: cfg.max_bot_chain,
+            reply_queue_limit: cfg.reply_queue_limit.max(1),
             reply_context_max_chars: cfg.reply_context_max_chars,
             recent_context_messages: cfg.recent_context_messages,
             context_message_max_chars: cfg.context_message_max_chars,
@@ -73,6 +75,13 @@ impl ChatRuntime {
 
     pub fn max_bot_chain(&self) -> u32 {
         self.max_bot_chain
+    }
+
+    /// Max chat triggers queued (waiting or running) per channel before further
+    /// triggers are dropped. Clamped to at least 1 so a misconfig can't wedge
+    /// the queue shut.
+    pub fn reply_queue_limit(&self) -> u32 {
+        self.reply_queue_limit
     }
 
     pub fn reply_context_max_chars(&self) -> usize {

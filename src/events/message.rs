@@ -15,7 +15,7 @@ use twilight_http::Client;
 use twilight_model::channel::message::{AllowedMentions, Mention};
 use twilight_model::channel::Message;
 use twilight_model::id::{
-    marker::{GuildMarker, UserMarker},
+    marker::{ChannelMarker, GuildMarker, UserMarker},
     Id,
 };
 
@@ -32,6 +32,20 @@ struct AbortOnDrop(tokio::task::JoinHandle<()>);
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
         self.0.abort();
+    }
+}
+
+/// Releases a reserved chat-queue slot on every exit path (including early
+/// returns and panics) so a failed/aborted round-trip can't permanently shrink
+/// a channel's reply-queue capacity.
+struct QueueSlot<'a> {
+    state: &'a ChannelState,
+    channel: Id<ChannelMarker>,
+}
+
+impl Drop for QueueSlot<'_> {
+    fn drop(&mut self) {
+        self.state.leave_chat_queue(self.channel);
     }
 }
 
@@ -156,23 +170,37 @@ pub async fn handle_message(
         return Ok(());
     }
 
-    // Chat-trigger flood/concurrency gate (DoS guard). Automod is guild-only,
-    // so a scripted DM flood could otherwise stack N simultaneous LLM calls
-    // against the single-mutex server. Admit at most one in-flight round-trip
-    // per channel and no more than one per `chat_min_reply_gap`. Everything
-    // past this point MUST clear the gate via `end_chat` — the closure below
-    // makes every exit path do so.
-    if !channel_state.try_begin_chat(message.channel_id, chat_min_reply_gap) {
+    // Bounded, serialized reply queue (DoS guard + spam-proofing). Automod is
+    // guild-only, so a scripted DM flood could otherwise stack N simultaneous
+    // LLM calls against the single-mutex server. Up to `reply_queue_limit`
+    // triggers may be waiting or in progress per channel; a burst is answered
+    // ONE AT A TIME in arrival order, and anything beyond the limit is dropped.
+    // This replaces the old drop-on-in-flight gate: instead of ignoring pings
+    // that land mid-reply, Sig now works through a short queue of them.
+    let queue_limit = chat.reply_queue_limit();
+    let Some(gate) = channel_state.try_enter_chat_queue(message.channel_id, queue_limit) else {
         tracing::debug!(
-            "Chat trigger skipped (in-flight or cooldown) in channel {}",
+            "Chat reply queue full (limit {}) in channel {}; dropping trigger",
+            queue_limit,
             message.channel_id
         );
         return Ok(());
+    };
+    // RAII: free the queue slot on every exit path (early return / panic).
+    let _slot = QueueSlot {
+        state: channel_state,
+        channel: message.channel_id,
+    };
+    // Take our FIFO turn; the guard is held across the whole round-trip so
+    // queued triggers for this channel run strictly one after another.
+    let _turn = gate.lock().await;
+    // Pace consecutive replies so a queued burst isn't machine-gunned. The
+    // first reply in a channel never waits; a zero gap never paces.
+    let wait = channel_state.chat_pace(message.channel_id, chat_min_reply_gap);
+    if !wait.is_zero() {
+        tokio::time::sleep(wait).await;
     }
-
-    let result = run_chat_reply(message, http, chat, bot_user_id, channel_state).await;
-    channel_state.end_chat(message.channel_id);
-    result
+    run_chat_reply(message, http, chat, bot_user_id, channel_state).await
 }
 
 /// The chat round-trip proper. Runs only after the per-channel in-flight gate

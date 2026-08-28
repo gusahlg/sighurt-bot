@@ -95,12 +95,18 @@ pub struct ChatConfig {
     /// Per-message character cap for ambient context.
     #[serde(default = "default_context_message_max_chars")]
     pub context_message_max_chars: usize,
-    /// Minimum seconds between chat replies per channel. A trigger arriving
-    /// while a reply is in flight, or sooner than this after the previous
-    /// trigger, is skipped. Applies to DMs (which automod doesn't cover) as a
-    /// flood guard, and everywhere else too.
+    /// Minimum seconds between chat replies per channel. Triggers are no longer
+    /// dropped for arriving too soon (they queue — see `reply_queue_limit`);
+    /// this now paces a queued burst so consecutive replies are spaced at least
+    /// this far apart instead of being machine-gunned out back-to-back.
     #[serde(default = "default_min_seconds_between_replies")]
     pub min_seconds_between_replies: u64,
+    /// Maximum chat triggers that may be waiting or in progress per channel at
+    /// once. A burst of pings/DMs is answered one at a time in arrival order;
+    /// triggers arriving while this many are already queued are dropped (flood
+    /// guard / spam-proofing).
+    #[serde(default = "default_reply_queue_limit")]
+    pub reply_queue_limit: u32,
     /// Enable explicit live retrieval for `!search` and natural-language
     /// "search the web" requests.
     #[serde(default = "default_true")]
@@ -256,6 +262,10 @@ fn default_min_seconds_between_replies() -> u64 {
     2
 }
 
+fn default_reply_queue_limit() -> u32 {
+    4
+}
+
 fn default_web_search_max_results() -> usize {
     4
 }
@@ -344,6 +354,7 @@ impl Default for ChatConfig {
             recent_context_messages: default_recent_context_messages(),
             context_message_max_chars: default_context_message_max_chars(),
             min_seconds_between_replies: 2,
+            reply_queue_limit: default_reply_queue_limit(),
             web_search_enabled: true,
             web_search_max_results: default_web_search_max_results(),
             web_search_timeout_secs: default_web_search_timeout_secs(),

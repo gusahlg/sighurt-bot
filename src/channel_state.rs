@@ -16,7 +16,9 @@
 
 use parking_lot::Mutex;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::Mutex as AsyncMutex;
 use twilight_model::id::Id;
 use twilight_model::id::marker::{ChannelMarker, UserMarker};
 
@@ -31,11 +33,19 @@ struct ChannelEntry {
     consecutive_bot_replies: u32,
     /// author id -> display name, insertion-ordered for cheap eviction.
     recent_authors: Vec<(Id<UserMarker>, String)>,
-    /// A chat LLM round-trip is currently in flight for this channel. Blocks
-    /// concurrent triggers (DM-flood DoS guard) until it clears.
-    chat_in_flight: bool,
-    /// When the last chat trigger was admitted for this channel. Used to
-    /// enforce a minimum spacing between replies.
+    /// Number of chat triggers currently WAITING or in progress for this
+    /// channel. Bounds the reply queue: once it hits the limit, further
+    /// triggers are dropped (flood guard). Incremented on admission, decremented
+    /// when the round-trip finishes.
+    chat_pending: u32,
+    /// Per-channel serializer. Admitted triggers `.lock().await` this to take
+    /// turns, so a burst is answered ONE AT A TIME in arrival order (tokio's
+    /// Mutex is FIFO-fair) instead of hitting the single-mutex model server
+    /// concurrently. Cloned out under the sync lock, then awaited.
+    chat_gate: Arc<AsyncMutex<()>>,
+    /// Projected start time of the last chat reply admitted in this channel.
+    /// Used to pace consecutive replies at least `min_gap` apart so a queued
+    /// burst isn't machine-gunned out back-to-back.
     last_chat_trigger: Option<Instant>,
     /// Human messages seen since the bot last spoke in this channel. Drives
     /// unprompted replies ("jump in every ~N messages").
@@ -127,38 +137,55 @@ impl ChannelState {
         }
     }
 
-    /// Try to admit a chat trigger for this channel. Denies (returns `false`)
-    /// when a round-trip is already in flight for the channel OR when the last
-    /// admitted trigger was less than `min_gap` ago. On success marks the
-    /// channel in-flight and stamps the trigger time; the caller MUST later
-    /// call [`end_chat`](Self::end_chat) to clear the in-flight flag.
+    /// Try to reserve a slot in this channel's reply queue. Returns `Some(gate)`
+    /// when admitted — the caller MUST later call
+    /// [`leave_chat_queue`](Self::leave_chat_queue) and should `gate.lock().await`
+    /// to take its FIFO turn before replying. Returns `None` when `limit`
+    /// triggers are already waiting or in progress for this channel (flood
+    /// guard: the burst is dropped, not stacked).
     ///
-    /// This is the DM-flood / concurrency guard on the CHAT TRIGGER itself
-    /// (guild automod doesn't cover DMs): a scripted flood can't stack up N
-    /// simultaneous LLM calls against the single-mutex server.
-    pub fn try_begin_chat(&self, channel_id: Id<ChannelMarker>, min_gap: Duration) -> bool {
+    /// Replaces the old drop-on-in-flight gate: instead of ignoring a trigger
+    /// that arrives mid-reply, we queue up to `limit` of them and answer each in
+    /// turn, so Sig works through a spam of pings/DMs. The single-mutex model
+    /// server is still never hit concurrently because `chat_gate` serializes.
+    pub fn try_enter_chat_queue(
+        &self,
+        channel_id: Id<ChannelMarker>,
+        limit: u32,
+    ) -> Option<Arc<AsyncMutex<()>>> {
+        let mut channels = self.channels.lock();
+        let entry = channels.entry(channel_id).or_default();
+        if entry.chat_pending >= limit {
+            return None;
+        }
+        entry.chat_pending += 1;
+        Some(Arc::clone(&entry.chat_gate))
+    }
+
+    /// Release a queue slot reserved by
+    /// [`try_enter_chat_queue`](Self::try_enter_chat_queue). Idempotent,
+    /// saturates at 0, and safe even if the entry was evicted.
+    pub fn leave_chat_queue(&self, channel_id: Id<ChannelMarker>) {
+        if let Some(entry) = self.channels.lock().get_mut(&channel_id) {
+            entry.chat_pending = entry.chat_pending.saturating_sub(1);
+        }
+    }
+
+    /// Compute how long to wait, once it's this trigger's turn, so consecutive
+    /// replies in the channel are spaced at least `min_gap` apart, and stamp
+    /// this reply's projected start. Returns the (possibly zero) sleep. The
+    /// very first reply in a channel never waits. This paces a queued burst so
+    /// it isn't machine-gunned, without ever dropping a queued trigger.
+    pub fn chat_pace(&self, channel_id: Id<ChannelMarker>, min_gap: Duration) -> Duration {
         let now = Instant::now();
         let mut channels = self.channels.lock();
         let entry = channels.entry(channel_id).or_default();
-        if entry.chat_in_flight {
-            return false;
-        }
-        if let Some(last) = entry.last_chat_trigger {
-            if now.duration_since(last) < min_gap {
-                return false;
-            }
-        }
-        entry.chat_in_flight = true;
-        entry.last_chat_trigger = Some(now);
-        true
-    }
-
-    /// Clear the in-flight flag set by [`try_begin_chat`](Self::try_begin_chat).
-    /// Idempotent and safe to call even if the entry was evicted.
-    pub fn end_chat(&self, channel_id: Id<ChannelMarker>) {
-        if let Some(entry) = self.channels.lock().get_mut(&channel_id) {
-            entry.chat_in_flight = false;
-        }
+        let wait = match entry.last_chat_trigger {
+            Some(last) => min_gap.saturating_sub(now.duration_since(last)),
+            None => Duration::ZERO,
+        };
+        entry.last_chat_trigger = Some(now + wait);
+        wait
     }
 
     /// Atomically claim an unprompted-reply trigger. Fires once the channel
@@ -327,35 +354,52 @@ mod tests {
     }
 
     #[test]
-    fn chat_gate_blocks_concurrent_in_flight() {
+    fn chat_queue_bounds_pending_and_frees_on_leave() {
         let state = ChannelState::new();
-        // First trigger admitted; a zero cooldown isolates the in-flight test.
-        assert!(state.try_begin_chat(CH, Duration::ZERO));
-        // Second trigger while the first is in flight is denied.
-        assert!(!state.try_begin_chat(CH, Duration::ZERO));
-        // After the round-trip ends, a new trigger is admitted again.
-        state.end_chat(CH);
-        assert!(state.try_begin_chat(CH, Duration::ZERO));
+        // Up to `limit` triggers may be queued at once; the next is dropped.
+        assert!(state.try_enter_chat_queue(CH, 4).is_some());
+        assert!(state.try_enter_chat_queue(CH, 4).is_some());
+        assert!(state.try_enter_chat_queue(CH, 4).is_some());
+        assert!(state.try_enter_chat_queue(CH, 4).is_some());
+        assert!(state.try_enter_chat_queue(CH, 4).is_none(), "5th over limit");
+        // Finishing one frees exactly one slot.
+        state.leave_chat_queue(CH);
+        assert!(state.try_enter_chat_queue(CH, 4).is_some());
+        assert!(state.try_enter_chat_queue(CH, 4).is_none());
     }
 
     #[test]
-    fn chat_gate_enforces_cooldown() {
+    fn chat_queue_gate_is_shared_per_channel_distinct_across() {
+        let state = ChannelState::new();
+        let a = state.try_enter_chat_queue(CH, 4).unwrap();
+        let b = state.try_enter_chat_queue(CH, 4).unwrap();
+        // Same channel hands out the SAME serializer, so triggers take turns.
+        assert!(Arc::ptr_eq(&a, &b));
+        let other = state.try_enter_chat_queue(Id::new(200), 4).unwrap();
+        // A different channel has an independent queue and serializer.
+        assert!(!Arc::ptr_eq(&a, &other));
+    }
+
+    #[test]
+    fn chat_queue_leave_saturates_at_zero() {
+        let state = ChannelState::new();
+        // Releasing with nothing reserved must not underflow the counter.
+        state.leave_chat_queue(CH);
+        assert!(state.try_enter_chat_queue(CH, 1).is_some());
+        assert!(state.try_enter_chat_queue(CH, 1).is_none());
+    }
+
+    #[test]
+    fn chat_pace_first_reply_is_immediate_then_spaces() {
         let state = ChannelState::new();
         let gap = Duration::from_secs(3600);
-        assert!(state.try_begin_chat(CH, gap));
-        state.end_chat(CH);
-        // Within the cooldown window: denied even though nothing is in flight.
-        assert!(!state.try_begin_chat(CH, gap));
-        // Zero cooldown always admits once the in-flight flag is clear.
-        assert!(state.try_begin_chat(CH, Duration::ZERO));
-    }
-
-    #[test]
-    fn chat_gate_is_per_channel() {
-        let state = ChannelState::new();
-        assert!(state.try_begin_chat(CH, Duration::ZERO));
-        // A different channel is independent.
-        assert!(state.try_begin_chat(Id::new(200), Duration::ZERO));
+        // First reply in a channel never waits.
+        assert_eq!(state.chat_pace(CH, gap), Duration::ZERO);
+        // The next reply, admitted immediately after, must wait ~gap.
+        let wait = state.chat_pace(CH, gap);
+        assert!(wait > Duration::from_secs(3590) && wait <= gap, "wait was {wait:?}");
+        // A zero gap never paces.
+        assert_eq!(state.chat_pace(Id::new(200), Duration::ZERO), Duration::ZERO);
     }
 
     #[test]
