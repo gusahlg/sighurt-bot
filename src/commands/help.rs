@@ -52,7 +52,10 @@ const HELP_TEXT: &str = "\
 • `/moderation on|off` — turn Sig's self-filter on/off
 • `/filterword add|remove|list` — manage the reply-filter deny-list
 • `/automod ...` — configure user auto-moderation
-• `/autorole ...` — configure the role given to new members";
+• `/autorole ...` — configure the role given to new members
+
+*Owner only*
+• `/set config <model> <computers>` — pick which bespoke model runs on which machine(s)";
 
 pub async fn handle(
     _interaction: &Interaction,

@@ -10,6 +10,7 @@ pub mod mute;
 pub mod ping;
 pub mod purge;
 pub mod say;
+pub mod set_config;
 pub mod serverinfo;
 pub mod userinfo;
 
@@ -66,6 +67,8 @@ fn command_definitions() -> Vec<Command> {
         // leave open to everyone.
         say::create_command(),
         help::create_command(),
+        // Owner-only runtime control (hard user-id gate in the handler).
+        set_config::create_command(),
     ]
 }
 
@@ -97,6 +100,7 @@ pub async fn handle_interaction(
         "userinfo" => userinfo::handle(&interaction, data, &http, &pool).await,
         "serverinfo" => serverinfo::handle(&interaction, data, &http, &pool).await,
         "say" => say::handle(&interaction, data, &http, &pool).await,
+        "set" => set_config::handle(&interaction, data).await,
         "help" => help::handle(&interaction, data).await,
         "ai" | "moderation" | "filterword" => match chat.as_deref() {
             Some(chat) => match data.name.as_str() {
@@ -250,7 +254,7 @@ mod tests {
             .collect::<Vec<_>>();
         // Bump this when adding/removing a command (and update /help + the
         // dispatch match in handle_interaction).
-        assert_eq!(names.len(), 14, "registry size changed — update /help too");
+        assert_eq!(names.len(), 15, "registry size changed — update /help too");
         for expected in [
             "ban",
             "kick",
@@ -266,6 +270,7 @@ mod tests {
             "serverinfo",
             "say",
             "help",
+            "set",
         ] {
             assert!(
                 names.iter().any(|name| name == expected),
