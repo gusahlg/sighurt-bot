@@ -12,13 +12,9 @@ StartLimitIntervalSec=0
 Type=notify
 WorkingDirectory=%h/discord-bot
 ExecStart=%h/discord-bot/target/release/discord-bot
-# Every (re)start of the bot also bounces the LLM server so a crash
-# recovers the whole stack, not just the bot half. "-" so a missing/broken
-# LLM unit doesn't keep the bot (moderation, scraping) down.
-ExecStartPre=-systemctl --user restart sighurt-llm.service
-# Type=simple reports "started" before the transformer has loaded. Prefer to
-# wait for /healthz so chat is ready when the gateway connects; the leading
-# "-" preserves moderation/scraping if the model remains unavailable.
+# Wait for the configured chat endpoint (localhost 1.1B or desktop 16B).
+# wait_for_llm.sh bounces sighurt-llm only when endpoint_url is localhost.
+# "-" so a missing/broken LLM unit doesn't keep the bot (moderation, scraping) down.
 ExecStartPre=-%h/discord-bot/scripts/wait_for_llm.sh
 EnvironmentFile=%h/discord-bot/.env
 # always (not on-failure): the bot exits non-zero on gateway stalls, but a
