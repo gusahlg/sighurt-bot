@@ -1,7 +1,9 @@
 [Unit]
 Description=SuperSighurt Discord bot (twilight + LLM client)
-After=network-online.target sighurt-llm.service
-Wants=network-online.target sighurt-llm.service
+After=network-online.target
+Wants=network-online.target
+# sighurt-llm is started by wait_for_llm.sh only when endpoint_url is localhost.
+# Wants=sighurt-llm used to force the 1.1B up even while Discord talked to the 16B.
 # Never give up restarting; RestartSteps below backs off instead.
 StartLimitIntervalSec=0
 
