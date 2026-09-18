@@ -28,6 +28,10 @@ pub fn strip_thinking(text: &str) -> String {
 /// only count at the START of a line ("sig:", "tester:") so prose like "for
 /// you: here it is" survives.
 pub fn truncate_at_drift(text: &str, known_names: &[String]) -> String {
+    // A reply that OPENS with a speaker label ("endeavor: ok so what did i do")
+    // is the model narrating someone else's line; keep the words, drop the tag.
+    let text = strip_leading_label(text, known_names);
+    let text = text.as_str();
     static META: OnceLock<Regex> = OnceLock::new();
     let meta = re(&META, r"(?i)(<\|im_(?:start|end)\|>|__URL__|__EMOJI__|\[\d{2,}/\d{2,}\]|^\s*-#\s)");
     let mut cut = meta.find(text).map(|m| m.start());
@@ -37,13 +41,7 @@ pub fn truncate_at_drift(text: &str, known_names: &[String]) -> String {
             let l = line.trim_start().to_lowercase();
             let label_end = l.find(':');
             if let Some(e) = label_end {
-                let label = l[..e].trim();
-                let is_label = !label.is_empty()
-                    && label.len() <= 24
-                    && !label.contains(' ')
-                    && (matches!(label, "sig" | "supersighurt" | "tester" | "user" | "you" | "assistant" | "bot" | "system" | "human")
-                        || known_names.iter().any(|n| n.to_lowercase() == label));
-                if is_label {
+                if is_speaker_label(&l[..e], known_names) {
                     cut = Some(cut.map_or(offset, |c| c.min(offset)));
                     break;
                 }
@@ -54,6 +52,25 @@ pub fn truncate_at_drift(text: &str, known_names: &[String]) -> String {
     let Some(c) = cut else { return text.to_string() };
     let head = text[..c].trim_end_matches([' ', '\n', '-', '#', '*', ':']);
     end_on_sentence(head, 0.4)
+}
+
+fn is_speaker_label(label: &str, known_names: &[String]) -> bool {
+    let l = label.trim().to_lowercase();
+    !l.is_empty()
+        && l.len() <= 24
+        && !l.contains(' ')
+        && (matches!(l.as_str(), "sig" | "supersighurt" | "tester" | "user" | "you" | "assistant" | "bot" | "system" | "human")
+            || known_names.iter().any(|n| n.to_lowercase() == l))
+}
+
+fn strip_leading_label(text: &str, known_names: &[String]) -> String {
+    let trimmed = text.trim_start();
+    if let Some(colon) = trimmed.find(':') {
+        if is_speaker_label(&trimmed[..colon], known_names) {
+            return trimmed[colon + 1..].trim_start().to_string();
+        }
+    }
+    text.to_string()
 }
 
 /// Prefer ending on the last sentence terminator when it keeps most of the text.
@@ -336,6 +353,8 @@ mod tests {
         assert_eq!(truncate_at_drift("here's what i found for you: nothing", &[]), "here's what i found for you: nothing");
         assert_eq!(truncate_at_drift("nice one.\ntester: what else", &[]), "nice one.");
         assert_eq!(truncate_at_drift("ok\nwalnutty2: lol", &["walnutty2".into()]), "ok");
+        assert_eq!(truncate_at_drift("endeavor: ok so what did i do wrong?", &["endeavor".into()]), "ok so what did i do wrong?");
+        assert_eq!(truncate_at_drift("note: this stays", &[]), "note: this stays");
         assert_eq!(truncate_at_drift("yo <|im_start|>user", &[]), "yo");
     }
 
