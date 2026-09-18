@@ -15,6 +15,7 @@
 //!   SIG_BATCH=file   one message per line; prints "INPUT\t-> REPLY" per line
 //!   DISCORD_TOKEN    optional; refreshes channel names for search_discord
 //!   SIG_GUILD_ID     guild id for the log tools (default 1367116390728994927)
+//!   SIG_TIMEOUT      per-request seconds (default 180)
 
 use discord_bot::agent::backend::{OpenAiBackend, Sampling};
 use discord_bot::agent::prompt::{Situation, ToolFormat, DEFAULT_PERSONA};
@@ -53,7 +54,8 @@ async fn main() -> anyhow::Result<()> {
         legacy_render: false,
         extra_tools: std::env::var("SIG_EXTRA_TOOLS").map(|v| v == "1").unwrap_or(false),
     };
-    let backend = OpenAiBackend::new(&endpoint, &api_key, "sig", 180, false)?;
+    let timeout: u64 = std::env::var("SIG_TIMEOUT").ok().and_then(|v| v.parse().ok()).unwrap_or(180);
+    let backend = OpenAiBackend::new(&endpoint, &api_key, "sig", timeout, false)?;
     let directory = Arc::new(Directory::new());
     let reminders = Arc::new(ReminderStore::load(cfg.memory_dir.join("reminders.jsonl")));
     let agent = Agent::new(cfg, backend, Arc::clone(&directory), reminders, None)?;
