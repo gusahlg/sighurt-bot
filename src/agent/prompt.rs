@@ -95,14 +95,13 @@ impl ToolFormat {
 
 /// Build the system prompt: persona + situation (+ text tool docs).
 pub fn system_prompt(persona: &str, situation: &Situation, user: &str, format: ToolFormat, is_owner: bool, sudo: bool) -> String {
+    let _ = (situation, user);
     let mut s = String::with_capacity(persona.len() + 1200);
     s.push_str(persona.trim_end());
-    // The bespoke v6 LoRA (text protocol) was never trained with a situation
-    // block and gets confused by it; the native-format models are.
-    if format != ToolFormat::Text && !situation.now.is_empty() {
-        s.push_str("\n\n");
-        s.push_str(&situation.render(user));
-    }
+    // The situation ("right now it is …, you are in #x") is NOT part of the
+    // system prompt: it changes every request and would break llama.cpp's
+    // prompt-prefix cache (persona + tool schema are a constant prefix).
+    // build_messages puts it in the first user turn instead.
     if format == ToolFormat::Text {
         s.push_str("\n\n");
         s.push_str(TEXT_PROTOCOL);
@@ -123,9 +122,14 @@ pub fn system_prompt(persona: &str, situation: &Situation, user: &str, format: T
     s
 }
 
-/// The `messages` array (system + ambient context + current message).
-pub fn build_messages(system: &str, request: &ChatRequest, format: ToolFormat) -> Vec<Value> {
+/// The `messages` array (system + situation + ambient context + current message).
+pub fn build_messages(system: &str, request: &ChatRequest, format: ToolFormat, situation: &Situation) -> Vec<Value> {
     let mut messages = vec![json!({"role": "system", "content": system})];
+    // The bespoke v6 LoRA (text protocol) was never trained with a situation
+    // line and gets confused by it; the native-format models are.
+    if format != ToolFormat::Text && !situation.now.is_empty() {
+        messages.push(json!({"role": "user", "content": format!("[{}]", situation.render(&request.user))}));
+    }
     let mut seen: Vec<String> = Vec::new();
     for entry in request.context.iter().rev().take(12).collect::<Vec<_>>().into_iter().rev() {
         let text = entry.text.trim();
@@ -176,8 +180,8 @@ pub fn build_messages(system: &str, request: &ChatRequest, format: ToolFormat) -
 }
 
 /// Messages for reaction mode: pick one emoji or pass.
-pub fn build_react_messages(system: &str, request: &ChatRequest) -> Vec<Value> {
-    let mut messages = build_messages(system, request, ToolFormat::None);
+pub fn build_react_messages(system: &str, request: &ChatRequest, situation: &Situation) -> Vec<Value> {
+    let mut messages = build_messages(system, request, ToolFormat::None, situation);
     if let Some(last) = messages.last_mut() {
         if let Some(content) = last.get("content").and_then(Value::as_str) {
             let text = format!(
@@ -317,12 +321,16 @@ mod tests {
     #[test]
     fn messages_shape() {
         let sys = system_prompt(DEFAULT_PERSONA, &Situation::default(), "zunabaro", ToolFormat::Native, false, false);
-        let m = build_messages(&sys, &req(), ToolFormat::Native);
+        let situ = Situation { now: "Thursday 2026-09-18 09:00 CEST".into(), channel_name: Some("general".into()), ..Default::default() };
+        let m = build_messages(&sys, &req(), ToolFormat::Native, &situ);
         assert_eq!(m[0]["role"], "system");
-        assert_eq!(m[1]["content"], "walnutty2: fries in the bag");
-        assert_eq!(m[2]["role"], "assistant");
+        assert!(m[1]["content"].as_str().unwrap().starts_with("[Right now it is Thursday"));
+        assert_eq!(m[2]["content"], "walnutty2: fries in the bag");
+        assert_eq!(m[3]["role"], "assistant");
         assert_eq!(m.last().unwrap()["content"], "zunabaro: what is rule 4");
-        let text = build_messages(&sys, &req(), ToolFormat::Text);
+        assert!(!sys.contains("Right now"));
+        let text = build_messages(&sys, &req(), ToolFormat::Text, &situ);
+        assert_eq!(text[1]["content"], "walnutty2: fries in the bag");
         assert!(text.last().unwrap()["content"].as_str().unwrap().ends_with("(reply as Sig)"));
         assert!(system_prompt(DEFAULT_PERSONA, &Situation::default(), "x", ToolFormat::Text, false, false).contains("TOOL_CALL"));
         assert!(!sys.contains("TOOL_CALL"));

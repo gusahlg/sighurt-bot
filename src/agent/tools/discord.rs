@@ -93,6 +93,23 @@ impl Directory {
         inner.refreshed = Some(Instant::now());
     }
 
+    /// Offline name map for tests/tools without a Discord token:
+    /// `{"channels": {"<id>": {"name": ".."}}}` or `{"<id>": "name"}`.
+    pub fn load_offline(&self, guild_id: u64, names: &serde_json::Value) {
+        let mut inner = self.inner.write();
+        let map = names.get("channels").unwrap_or(names);
+        if let Some(obj) = map.as_object() {
+            for (id, v) in obj {
+                let Ok(id) = id.parse::<u64>() else { continue };
+                let name = v.as_str().map(str::to_string).or_else(|| v.get("name").and_then(|n| n.as_str()).map(str::to_string));
+                if let Some(name) = name {
+                    inner.channels.insert(id, ChannelInfo { name, guild_id, is_voice: false, is_thread: false });
+                }
+            }
+        }
+        inner.refreshed = Some(Instant::now());
+    }
+
     pub fn needs_refresh(&self) -> bool {
         self.inner.read().refreshed.map_or(true, |t| t.elapsed() > Duration::from_secs(3600))
     }
@@ -668,6 +685,7 @@ pub async fn who_is(ctx: &ToolCtx<'_>, name: &str) -> Result<String, String> {
     Ok(out)
 }
 
+#[allow(dead_code)]
 pub async fn server_status(ctx: &ToolCtx<'_>) -> Result<String, String> {
     let Some(guild_id) = ctx.guild_id else {
         return Ok(format!("this is a DM with {}", ctx.user_name));

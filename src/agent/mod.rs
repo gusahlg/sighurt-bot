@@ -142,12 +142,12 @@ impl Agent {
         let tools_allowed = self.cfg.tool_format != ToolFormat::None && !request.react;
         let system = prompt::system_prompt(&self.cfg.persona, situation, &request.user, format, is_owner, sudo_password.is_some());
         if request.react {
-            let messages = prompt::build_react_messages(&system, &request);
+            let messages = prompt::build_react_messages(&system, &request, situation);
             let c = self.backend.chat(&messages, None, &self.cfg.sampling, 12, STOP).await?;
             return Ok(postprocess::strip_thinking(&c.content).trim().to_string());
         }
 
-        let mut messages = prompt::build_messages(&system, &request, format);
+        let mut messages = prompt::build_messages(&system, &request, format, situation);
         let native_tools = match format {
             ToolFormat::Native => Some(tools::native_tools(is_owner)),
             _ => None,
@@ -268,7 +268,11 @@ impl Agent {
                         "content": outcome.text,
                     }));
                 }
-                messages.push(json!({"role": "user", "content": format!("[{note}]")}));
+                // A clean native turn needs no coaching: the tool responses
+                // are the whole story (and that is how the training rows look).
+                if had_error || looped {
+                    messages.push(json!({"role": "user", "content": format!("[{note}]")}));
+                }
             } else {
                 let block = results.iter().map(|(c, o)| format!("[{}] {}", c.name, o.text)).collect::<Vec<_>>().join("\n\n");
                 messages.push(json!({"role": "user", "content": format!("TOOL RESULTS:\n{block}\n\n{note}")}));

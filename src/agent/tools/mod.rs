@@ -92,168 +92,133 @@ fn specs_all() -> &'static Vec<ToolSpec> {
         vec![
             ToolSpec {
                 name: "get_time",
-                description: "Current date and time (local + UTC). Use for any what-time/what-day question.",
+                description: "Current date and time.",
                 example: "{}",
                 parameters: obj(json!({}), &[]),
                 owner_only: false,
             },
             ToolSpec {
                 name: "calculator",
-                description: "Evaluate arithmetic exactly (e.g. 12*(3+4), sqrt(2), 13 squared, 15% of 80). Use for ANY math, never do it in your head.",
+                description: "Exact arithmetic (12*(3+4), sqrt(2), 13 squared, 15% of 80). Use for any math.",
                 example: r#"{"expression": "987654321*123456789"}"#,
-                parameters: obj(json!({"expression": {"type": "string", "description": "the math to evaluate"}}), &["expression"]),
+                parameters: obj(json!({"expression": {"type": "string"}}), &["expression"]),
                 owner_only: false,
             },
             ToolSpec {
                 name: "roll",
-                description: "Roll dice: NdM or NdM+K (2d6, d20, 4d6+3). Use instead of inventing a number.",
+                description: "Roll dice: 2d6, d20, 4d6+3.",
                 example: r#"{"dice": "2d6"}"#,
-                parameters: obj(json!({"dice": {"type": "string", "description": "dice notation like 2d6 or d20"}}), &["dice"]),
+                parameters: obj(json!({"dice": {"type": "string"}}), &["dice"]),
                 owner_only: false,
             },
             ToolSpec {
                 name: "unit_convert",
-                description: "Convert units (length, mass, time, data, speed, volume, area, C/F/K).",
+                description: "Convert units (length, mass, time, data, speed, volume, area, temperature).",
                 example: r#"{"value": 100, "from": "km", "to": "mi"}"#,
                 parameters: obj(json!({"value": {"type": "number"}, "from": {"type": "string"}, "to": {"type": "string"}}), &["value", "from", "to"]),
                 owner_only: false,
             },
             ToolSpec {
                 name: "text_util",
-                description: "Exact string ops: count (of=substring), word_count, char_count, reverse, upper, lower, title. Use for counting letters/words or reversing text.",
+                description: "Exact string ops: count (of=substring), word_count, char_count, reverse, upper, lower, title.",
                 example: r#"{"operation": "count", "text": "strawberry", "of": "r"}"#,
                 parameters: obj(json!({"operation": {"type": "string", "enum": ["count", "word_count", "char_count", "reverse", "upper", "lower", "title"]}, "text": {"type": "string"}, "of": {"type": "string"}}), &["operation", "text"]),
                 owner_only: false,
             },
             ToolSpec {
                 name: "weather",
-                description: "Current weather for a named city/place (not 'here').",
+                description: "Current weather for a named place.",
                 example: r#"{"location": "Stockholm"}"#,
                 parameters: obj(json!({"location": {"type": "string"}}), &["location"]),
                 owner_only: false,
             },
             ToolSpec {
                 name: "web_search",
-                description: "Search the live internet (DuckDuckGo + Wikipedia). Use for current facts you don't know.",
+                description: "Search the web for current facts.",
                 example: r#"{"query": "latest rust release"}"#,
                 parameters: obj(json!({"query": {"type": "string"}, "max_results": {"type": "integer"}}), &["query"]),
                 owner_only: false,
             },
             ToolSpec {
                 name: "wiki",
-                description: "Wikipedia summary of a topic (a few sentences).",
+                description: "Wikipedia summary of a topic.",
                 example: r#"{"topic": "Voyager 1"}"#,
                 parameters: obj(json!({"topic": {"type": "string"}}), &["topic"]),
                 owner_only: false,
             },
             ToolSpec {
                 name: "news",
-                description: "Latest headlines. No topic = general world/tech feeds; topic = news search for that topic.",
+                description: "Latest headlines; optional topic.",
                 example: r#"{"topic": "nvidia", "limit": 5}"#,
                 parameters: obj(json!({"topic": {"type": "string"}, "limit": {"type": "integer"}}), &[]),
                 owner_only: false,
             },
             ToolSpec {
                 name: "fetch_url",
-                description: "Read the text of a public web page someone linked (title + first part of the content).",
+                description: "Read the text of a linked web page.",
                 example: r#"{"url": "https://example.com/post"}"#,
                 parameters: obj(json!({"url": {"type": "string"}}), &["url"]),
                 owner_only: false,
             },
             ToolSpec {
                 name: "define",
-                description: "Dictionary definition of an English word.",
-                example: r#"{"word": "serendipity"}"#,
-                parameters: obj(json!({"word": {"type": "string"}}), &["word"]),
-                owner_only: false,
-            },
-            ToolSpec {
-                name: "urban",
-                description: "Urban Dictionary definition of slang / internet words.",
-                example: r#"{"term": "rizz"}"#,
-                parameters: obj(json!({"term": {"type": "string"}}), &["term"]),
+                description: "Definition of a word; slang=true uses Urban Dictionary.",
+                example: r#"{"word": "rizz", "slang": true}"#,
+                parameters: obj(json!({"word": {"type": "string"}, "slang": {"type": "boolean"}}), &["word"]),
                 owner_only: false,
             },
             ToolSpec {
                 name: "lookup_rule",
-                description: "The REAL posted server rule for a number/label (including ∞, -1, 16.1), or 'count' for how many rules. Never invent a rule.",
+                description: "The real posted server rule for a label (4, ∞, -1, 16.1) or 'count'. Never invent a rule.",
                 example: r#"{"label": "4"}"#,
-                parameters: obj(json!({"label": {"type": "string", "description": "rule number/label, or 'count'"}}), &["label"]),
+                parameters: obj(json!({"label": {"type": "string"}}), &["label"]),
                 owner_only: false,
             },
             ToolSpec {
                 name: "search_discord",
-                description: "Search THIS server's logged messages (who said what, quotes). Optional channel name, author, and n (message number from the start of that channel).",
+                description: "Search this server's message history; optional channel, author, n (message number).",
                 example: r#"{"query": "ham atoms", "channel": "general"}"#,
                 parameters: obj(json!({"query": {"type": "string"}, "channel": {"type": "string"}, "author": {"type": "string"}, "n": {"type": "integer"}, "limit": {"type": "integer"}}), &[]),
                 owner_only: false,
             },
             ToolSpec {
                 name: "random_message",
-                description: "A random real message from this server's history, optionally filtered by channel/author/contains, or the most reacted ones (sort='reactions'). Use for 'find a funny message'.",
+                description: "A random real message from this server (filters: channel, author, contains; sort=reactions for the most reacted).",
                 example: r#"{"contains": "fart", "sort": "reactions"}"#,
                 parameters: obj(json!({"channel": {"type": "string"}, "author": {"type": "string"}, "contains": {"type": "string"}, "sort": {"type": "string", "enum": ["random", "reactions"]}, "min_length": {"type": "integer"}}), &[]),
                 owner_only: false,
             },
             ToolSpec {
                 name: "server_activity",
-                description: "What's been happening on this server lately: active channels, who's been talking, recent topics (last N hours).",
+                description: "What's been happening on this server in the last N hours.",
                 example: r#"{"hours": 24}"#,
                 parameters: obj(json!({"hours": {"type": "integer"}, "channel": {"type": "string"}}), &[]),
                 owner_only: false,
             },
             ToolSpec {
                 name: "who_is",
-                description: "Profile of a server member from the logs: activity, favourite channels, when they joined, recent lines.",
+                description: "Profile of a server member from the logs.",
                 example: r#"{"name": "walnutty2"}"#,
                 parameters: obj(json!({"name": {"type": "string"}}), &["name"]),
                 owner_only: false,
             },
             ToolSpec {
-                name: "server_status",
-                description: "Live server status: member count, who is in voice channels right now, this channel's name.",
-                example: "{}",
-                parameters: obj(json!({}), &[]),
-                owner_only: false,
-            },
-            ToolSpec {
                 name: "remind",
-                description: "Set a reminder that Sig posts later in this channel. when = 'in 10 minutes', 'in 2h', 'at 18:30', 'tomorrow 09:00'.",
+                description: "Set a reminder posted later in this channel (when: 'in 10 minutes', 'at 18:30', 'tomorrow 09:00').",
                 example: r#"{"when": "in 20 minutes", "text": "check the oven"}"#,
                 parameters: obj(json!({"when": {"type": "string"}, "text": {"type": "string"}}), &["when", "text"]),
                 owner_only: false,
             },
             ToolSpec {
-                name: "write_note",
-                description: "Save a note/reminder-to-self you can look up later.",
-                example: r#"{"text": "zunabaro prefers tabs"}"#,
-                parameters: obj(json!({"text": {"type": "string"}}), &["text"]),
-                owner_only: false,
-            },
-            ToolSpec {
-                name: "read_notes",
-                description: "Read your saved notes (optionally filtered by a word).",
-                example: r#"{"query": "tabs", "limit": 8}"#,
-                parameters: obj(json!({"query": {"type": "string"}, "limit": {"type": "integer"}}), &[]),
-                owner_only: false,
-            },
-            ToolSpec {
-                name: "write_diary",
-                description: "Save a private diary entry (a reflection only you read back).",
-                example: r#"{"text": "good day, roasted three people"}"#,
-                parameters: obj(json!({"text": {"type": "string"}}), &["text"]),
-                owner_only: false,
-            },
-            ToolSpec {
-                name: "read_diary",
-                description: "Read your recent diary entries.",
-                example: r#"{"limit": 5}"#,
-                parameters: obj(json!({"query": {"type": "string"}, "limit": {"type": "integer"}}), &[]),
+                name: "memory",
+                description: "Your notes and diary: action=note|diary saves text, action=read_notes|read_diary reads (optional query, limit).",
+                example: r#"{"action": "note", "text": "zunabaro prefers tabs"}"#,
+                parameters: obj(json!({"action": {"type": "string", "enum": ["note", "diary", "read_notes", "read_diary"]}, "text": {"type": "string"}, "query": {"type": "string"}, "limit": {"type": "integer"}}), &["action"]),
                 owner_only: false,
             },
             ToolSpec {
                 name: "run_command",
-                description: "OWNER ONLY: run a shell command on the bot's host machine. Set sudo=true only if the owner provided a sudo password this turn.",
+                description: "OWNER ONLY: run a shell command on the bot host (sudo=true only with a sudo password).",
                 example: r#"{"command": "uptime", "sudo": false}"#,
                 parameters: obj(json!({"command": {"type": "string"}, "sudo": {"type": "boolean"}}), &["command"]),
                 owner_only: true,
@@ -500,18 +465,18 @@ pub fn canonical_name(name: &str) -> (String, Option<(&'static str, &'static str
         "headlines" | "get_news" | "news_search" => ("news", None),
         "fetch" | "read_url" | "read_page" | "open_url" | "get_url" | "browse_url" => ("fetch_url", None),
         "dictionary" | "definition" | "define_word" | "lookup_word" => ("define", None),
-        "urban_dictionary" | "urbandictionary" | "slang" => ("urban", None),
         "rule" | "rules" | "get_rule" | "server_rule" | "server_rules" | "rule_lookup" => ("lookup_rule", None),
         "discord_search" | "search_messages" | "search_server" | "search_history" | "search_chat" | "find_message" | "search_channel" => ("search_discord", None),
         "random" | "quote" | "random_quote" | "funny_message" | "find_funny_message" => ("random_message", None),
         "activity" | "whats_happening" | "recent_activity" | "channel_activity" | "server_summary" => ("server_activity", None),
         "whois" | "who" | "user_info" | "profile" | "member_info" => ("who_is", None),
-        "status" | "voice" | "voice_status" | "members" | "online" => ("server_status", None),
         "reminder" | "remind_me" | "set_reminder" | "timer" | "alarm" => ("remind", None),
-        "note" | "save_note" | "add_note" | "remember" | "memo" => ("write_note", None),
-        "notes" | "get_notes" | "list_notes" | "recall" => ("read_notes", None),
-        "diary" | "journal" | "diary_write" | "write_journal" => ("write_diary", None),
-        "diary_read" | "read_journal" | "get_diary" => ("read_diary", None),
+        "note" | "write_note" | "save_note" | "add_note" | "remember" | "memo" => ("memory", Some(("action", "note"))),
+        "notes" | "read_notes" | "get_notes" | "list_notes" | "recall" => ("memory", Some(("action", "read_notes"))),
+        "diary" | "write_diary" | "journal" | "diary_write" | "write_journal" => ("memory", Some(("action", "diary"))),
+        "read_diary" | "diary_read" | "read_journal" | "get_diary" => ("memory", Some(("action", "read_diary"))),
+        "urban" | "urban_dictionary" | "urbandictionary" | "slang" => ("define", Some(("slang", "true"))),
+        "server_status" | "status" | "voice" | "voice_status" | "members" | "online" => ("server_activity", None),
         "shell" | "bash" | "exec" | "command" | "execute" | "run" | "terminal" => ("run_command", None),
         "weather_lookup" | "get_weather" | "forecast" => ("weather", None),
         _ => (name, None),
@@ -577,8 +542,14 @@ pub async fn run(call: &ToolCall, ctx: &ToolCtx<'_>) -> ToolOutcome {
             web::news(ctx.web, ctx.news_feeds, s_arg(args, &["topic", "query", "q"]), usize_arg(args, &["limit", "n"], 6, 10)).await
         }
         "fetch_url" => web::fetch_url(ctx.web, s_arg(args, &["url", "link", "raw"]).unwrap_or("")).await,
-        "define" => web::define(ctx.web, s_arg(args, &["word", "term", "query", "raw"]).unwrap_or("")).await,
-        "urban" => web::urban(ctx.web, s_arg(args, &["term", "word", "query", "raw"]).unwrap_or("")).await,
+        "define" => {
+            let word = s_arg(args, &["word", "term", "query", "raw"]).unwrap_or("");
+            if bool_arg(args, "slang") || bool_arg(args, "urban") {
+                web::urban(ctx.web, word).await
+            } else {
+                web::define(ctx.web, word).await
+            }
+        }
         "lookup_rule" => discord::lookup_rule(ctx, s_arg(args, &["label", "rule", "number", "n", "raw"]).unwrap_or("")),
         "search_discord" => discord::search(
             ctx,
@@ -598,12 +569,20 @@ pub async fn run(call: &ToolCall, ctx: &ToolCtx<'_>) -> ToolOutcome {
         ),
         "server_activity" => discord::server_activity(ctx, usize_arg(args, &["hours"], 24, 24 * 14), s_arg(args, &["channel"])).await,
         "who_is" => discord::who_is(ctx, s_arg(args, &["name", "user", "who", "raw"]).unwrap_or("")).await,
-        "server_status" => discord::server_status(ctx).await,
         "remind" => memory::remind(ctx, s_arg(args, &["when", "time", "in", "at"]).unwrap_or(""), s_arg(args, &["text", "message", "what"]).unwrap_or("")),
-        "write_note" => memory::write_note(ctx.memory_dir, s_arg(args, &["text", "note", "content", "raw"]).unwrap_or("")),
-        "read_notes" => memory::read_notes(ctx.memory_dir, s_arg(args, &["query", "q"]), usize_arg(args, &["limit"], 8, 40)),
-        "write_diary" => memory::write_diary(ctx.memory_dir, s_arg(args, &["text", "entry", "content", "raw"]).unwrap_or("")),
-        "read_diary" => memory::read_diary(ctx.memory_dir, s_arg(args, &["query", "q"]), usize_arg(args, &["limit"], 5, 25)),
+        "memory" => {
+            let action = s_arg(args, &["action", "op", "mode"]).unwrap_or("note").to_lowercase();
+            let text = s_arg(args, &["text", "note", "entry", "content", "raw"]).unwrap_or("");
+            let query = s_arg(args, &["query", "q"]);
+            let limit = usize_arg(args, &["limit"], 8, 40);
+            match action.as_str() {
+                "note" | "write_note" | "save" | "remember" => memory::write_note(ctx.memory_dir, text),
+                "diary" | "write_diary" | "journal" => memory::write_diary(ctx.memory_dir, text),
+                "read_notes" | "notes" | "read" | "recall" => memory::read_notes(ctx.memory_dir, query, limit),
+                "read_diary" | "diary_read" => memory::read_diary(ctx.memory_dir, query, limit.min(25)),
+                other => Err(format!("memory error: unknown action '{other}' (note, diary, read_notes, read_diary)")),
+            }
+        }
         "run_command" => {
             let command = s_arg(args, &["command", "cmd", "raw"]).unwrap_or("");
             system::run_command(command, bool_arg(args, "sudo"), ctx.sudo_password).await
@@ -667,11 +646,23 @@ pub fn coerce_args(call: &mut ToolCall, user_input: &str) {
     if present {
         return;
     }
-    let derived = match canonical.as_str() {
+    let mut derived = match canonical.as_str() {
         "roll" => dice::find_spec(user_input).unwrap_or_else(|| "1d20".to_string()),
         "fetch_url" => user_input.split_whitespace().find(|w| w.starts_with("http")).unwrap_or("").trim_matches(['<', '>']).to_string(),
         _ => strip_lead_in(user_input),
     };
+    // "ham atoms in general" -> query "ham atoms", channel "general".
+    if canonical == "search_discord" && call.args.get("channel").is_none() {
+        if let Some((q, chan)) = derived.rsplit_once(" in ") {
+            let chan = chan.trim().trim_start_matches('#');
+            if !q.trim().is_empty() && !chan.is_empty() && !chan.contains(' ') {
+                if let Some(obj) = call.args.as_object_mut() {
+                    obj.insert("channel".to_string(), Value::String(chan.to_string()));
+                }
+                derived = q.trim().to_string();
+            }
+        }
+    }
     if derived.is_empty() {
         return;
     }
@@ -734,6 +725,10 @@ mod tests {
         let mut c = ToolCall { id: None, name: "search_discord".into(), args: json!({"channel": "general"}) };
         coerce_args(&mut c, "search for ham atoms");
         assert_eq!(c.args["query"], "ham atoms");
+        let mut c = ToolCall { id: None, name: "search_discord".into(), args: json!({}) };
+        coerce_args(&mut c, "search for ham atoms in general");
+        assert_eq!(c.args["query"], "ham atoms");
+        assert_eq!(c.args["channel"], "general");
         let mut c = ToolCall { id: None, name: "roll".into(), args: json!({}) };
         coerce_args(&mut c, "roll 2d6 pls");
         assert_eq!(c.args["dice"], "2d6");
@@ -750,6 +745,6 @@ mod tests {
         let docs = text_docs(false);
         assert!(docs.contains("calculator"));
         assert!(!docs.contains("run_command"));
-        assert!(native_tools(true).as_array().unwrap().len() > 20);
+        assert!(native_tools(true).as_array().unwrap().len() >= 18);
     }
 }
