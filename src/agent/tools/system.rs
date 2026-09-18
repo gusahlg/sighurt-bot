@@ -77,7 +77,14 @@ pub fn time_in(place: &str) -> Result<String, String> {
     if text.is_empty() {
         return Err("time_in error: date printed nothing".to_string());
     }
-    let here = chrono::Local::now().format("%H:%M %Z").to_string();
+    // chrono's Local prints the offset for %Z; `date` knows the zone name.
+    let here = std::process::Command::new("date")
+        .arg("+%H:%M %Z")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| chrono::Local::now().format("%H:%M %Z").to_string());
     Ok(format!("{}: {text}. here (Sweden) it is {here}.", place.trim()))
 }
 
