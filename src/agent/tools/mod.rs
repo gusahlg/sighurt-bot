@@ -36,6 +36,9 @@ pub struct ToolSpec {
     /// JSON schema for the native protocol.
     pub parameters: Value,
     pub owner_only: bool,
+    /// Not part of the schema the current model was trained with; offered
+    /// only when `chat.extra_tools = true`.
+    pub extra: bool,
 }
 
 /// One parsed call.
@@ -96,6 +99,7 @@ fn specs_all() -> &'static Vec<ToolSpec> {
                 example: "{}",
                 parameters: obj(json!({}), &[]),
                 owner_only: false,
+                extra: false,
             },
             ToolSpec {
                 name: "calculator",
@@ -103,6 +107,7 @@ fn specs_all() -> &'static Vec<ToolSpec> {
                 example: r#"{"expression": "987654321*123456789"}"#,
                 parameters: obj(json!({"expression": {"type": "string"}}), &["expression"]),
                 owner_only: false,
+                extra: false,
             },
             ToolSpec {
                 name: "roll",
@@ -110,6 +115,7 @@ fn specs_all() -> &'static Vec<ToolSpec> {
                 example: r#"{"dice": "2d6"}"#,
                 parameters: obj(json!({"dice": {"type": "string"}}), &["dice"]),
                 owner_only: false,
+                extra: false,
             },
             ToolSpec {
                 name: "unit_convert",
@@ -117,6 +123,7 @@ fn specs_all() -> &'static Vec<ToolSpec> {
                 example: r#"{"value": 100, "from": "km", "to": "mi"}"#,
                 parameters: obj(json!({"value": {"type": "number"}, "from": {"type": "string"}, "to": {"type": "string"}}), &["value", "from", "to"]),
                 owner_only: false,
+                extra: false,
             },
             ToolSpec {
                 name: "text_util",
@@ -124,6 +131,7 @@ fn specs_all() -> &'static Vec<ToolSpec> {
                 example: r#"{"operation": "count", "text": "strawberry", "of": "r"}"#,
                 parameters: obj(json!({"operation": {"type": "string"}, "text": {"type": "string"}, "of": {"type": "string"}}), &["operation", "text"]),
                 owner_only: false,
+                extra: false,
             },
             ToolSpec {
                 name: "weather",
@@ -131,6 +139,7 @@ fn specs_all() -> &'static Vec<ToolSpec> {
                 example: r#"{"location": "Stockholm"}"#,
                 parameters: obj(json!({"location": {"type": "string"}}), &["location"]),
                 owner_only: false,
+                extra: false,
             },
             ToolSpec {
                 name: "web_search",
@@ -138,6 +147,7 @@ fn specs_all() -> &'static Vec<ToolSpec> {
                 example: r#"{"query": "latest rust release"}"#,
                 parameters: obj(json!({"query": {"type": "string"}}), &["query"]),
                 owner_only: false,
+                extra: false,
             },
             ToolSpec {
                 name: "wiki",
@@ -145,6 +155,7 @@ fn specs_all() -> &'static Vec<ToolSpec> {
                 example: r#"{"topic": "Voyager 1"}"#,
                 parameters: obj(json!({"topic": {"type": "string"}}), &["topic"]),
                 owner_only: false,
+                extra: false,
             },
             ToolSpec {
                 name: "news",
@@ -152,6 +163,7 @@ fn specs_all() -> &'static Vec<ToolSpec> {
                 example: r#"{"topic": "nvidia", "limit": 5}"#,
                 parameters: obj(json!({"topic": {"type": "string"}}), &[]),
                 owner_only: false,
+                extra: false,
             },
             ToolSpec {
                 name: "fetch_url",
@@ -159,6 +171,7 @@ fn specs_all() -> &'static Vec<ToolSpec> {
                 example: r#"{"url": "https://example.com/post"}"#,
                 parameters: obj(json!({"url": {"type": "string"}}), &["url"]),
                 owner_only: false,
+                extra: false,
             },
             ToolSpec {
                 name: "define",
@@ -166,6 +179,7 @@ fn specs_all() -> &'static Vec<ToolSpec> {
                 example: r#"{"word": "rizz", "slang": true}"#,
                 parameters: obj(json!({"word": {"type": "string"}, "slang": {"type": "boolean"}}), &["word"]),
                 owner_only: false,
+                extra: false,
             },
             ToolSpec {
                 name: "lookup_rule",
@@ -173,6 +187,7 @@ fn specs_all() -> &'static Vec<ToolSpec> {
                 example: r#"{"label": "4"}"#,
                 parameters: obj(json!({"label": {"type": "string"}}), &["label"]),
                 owner_only: false,
+                extra: false,
             },
             ToolSpec {
                 name: "search_discord",
@@ -180,6 +195,7 @@ fn specs_all() -> &'static Vec<ToolSpec> {
                 example: r#"{"query": "ham atoms", "channel": "general"}"#,
                 parameters: obj(json!({"query": {"type": "string"}, "channel": {"type": "string"}, "author": {"type": "string"}}), &["query"]),
                 owner_only: false,
+                extra: false,
             },
             ToolSpec {
                 name: "random_message",
@@ -187,6 +203,7 @@ fn specs_all() -> &'static Vec<ToolSpec> {
                 example: r#"{"contains": "fart", "sort": "reactions"}"#,
                 parameters: obj(json!({"contains": {"type": "string"}, "channel": {"type": "string"}, "sort": {"type": "string"}}), &[]),
                 owner_only: false,
+                extra: false,
             },
             ToolSpec {
                 name: "server_activity",
@@ -194,6 +211,7 @@ fn specs_all() -> &'static Vec<ToolSpec> {
                 example: r#"{"hours": 24}"#,
                 parameters: obj(json!({"hours": {"type": "integer"}}), &[]),
                 owner_only: false,
+                extra: false,
             },
             ToolSpec {
                 name: "who_is",
@@ -201,6 +219,7 @@ fn specs_all() -> &'static Vec<ToolSpec> {
                 example: r#"{"name": "walnutty2"}"#,
                 parameters: obj(json!({"name": {"type": "string"}}), &["name"]),
                 owner_only: false,
+                extra: false,
             },
             ToolSpec {
                 name: "remind",
@@ -208,6 +227,7 @@ fn specs_all() -> &'static Vec<ToolSpec> {
                 example: r#"{"when": "in 20 minutes", "text": "check the oven"}"#,
                 parameters: obj(json!({"when": {"type": "string"}, "text": {"type": "string"}}), &["when", "text"]),
                 owner_only: false,
+                extra: false,
             },
             ToolSpec {
                 name: "memory",
@@ -215,6 +235,23 @@ fn specs_all() -> &'static Vec<ToolSpec> {
                 example: r#"{"action": "note", "text": "zunabaro prefers tabs"}"#,
                 parameters: obj(json!({"action": {"type": "string"}, "text": {"type": "string"}, "query": {"type": "string"}}), &["action"]),
                 owner_only: false,
+                extra: false,
+            },
+            ToolSpec {
+                name: "events",
+                description: "Upcoming scheduled events on this server (name, when, where, interested count).",
+                example: "{}",
+                parameters: obj(json!({}), &[]),
+                owner_only: false,
+                extra: true,
+            },
+            ToolSpec {
+                name: "time_in",
+                description: "Current time in another place or time zone (sweden, colombia, california, prague, hong kong, utc...).",
+                example: r#"{"place": "colombia"}"#,
+                parameters: obj(json!({"place": {"type": "string"}}), &["place"]),
+                owner_only: false,
+                extra: true,
             },
             ToolSpec {
                 name: "run_command",
@@ -222,20 +259,22 @@ fn specs_all() -> &'static Vec<ToolSpec> {
                 example: r#"{"command": "uptime", "sudo": false}"#,
                 parameters: obj(json!({"command": {"type": "string"}, "sudo": {"type": "boolean"}}), &["command"]),
                 owner_only: true,
+                extra: false,
             },
         ]
     })
 }
 
-/// Specs visible to this caller (owner-only tools are hidden from others).
-pub fn specs(is_owner: bool) -> Vec<&'static ToolSpec> {
-    specs_all().iter().filter(|s| is_owner || !s.owner_only).collect()
+/// Specs visible to this caller (owner-only tools are hidden from others;
+/// `extra` tools only when the deployment enables them).
+pub fn specs(is_owner: bool, extras: bool) -> Vec<&'static ToolSpec> {
+    specs_all().iter().filter(|s| (is_owner || !s.owner_only) && (extras || !s.extra)).collect()
 }
 
 /// OpenAI `tools` payload for the native protocol.
-pub fn native_tools(is_owner: bool) -> Value {
+pub fn native_tools(is_owner: bool, extras: bool) -> Value {
     Value::Array(
-        specs(is_owner)
+        specs(is_owner, extras)
             .into_iter()
             .map(|s| {
                 json!({"type": "function", "function": {"name": s.name, "description": s.description, "parameters": s.parameters}})
@@ -245,8 +284,8 @@ pub fn native_tools(is_owner: bool) -> Value {
 }
 
 /// One line per tool for the text protocol docs.
-pub fn text_docs(is_owner: bool) -> String {
-    specs(is_owner)
+pub fn text_docs(is_owner: bool, extras: bool) -> String {
+    specs(is_owner, extras)
         .into_iter()
         .map(|s| format!("- {} {} — {}", s.name, s.example, s.description))
         .collect::<Vec<_>>()
@@ -457,6 +496,8 @@ pub fn canonical_name(name: &str) -> (String, Option<(&'static str, &'static str
         "lower" | "lowercase" => ("text_util", Some(("operation", "lower"))),
         "text" | "string" | "string_util" => ("text_util", None),
         "time" | "clock" | "date" | "datetime" | "current_time" | "get_date" | "now" => ("get_time", None),
+        "time_zone" | "timezone" | "world_time" | "time_at" | "local_time" => ("time_in", None),
+        "event" | "scheduled_events" | "upcoming_events" | "calendar" | "schedule" => ("events", None),
         "calc" | "math" | "calculate" | "compute" | "eval" | "arithmetic" => ("calculator", None),
         "dice" | "roll_dice" | "dice_roll" | "rolldice" => ("roll", None),
         "convert" | "unit" | "units" | "convert_units" | "unit_conversion" => ("unit_convert", None),
@@ -500,7 +541,7 @@ pub async fn run(call: &ToolCall, ctx: &ToolCtx<'_>) -> ToolOutcome {
         return ToolOutcome::err(format!(
             "error: no such tool '{}' (available: {})",
             call.name,
-            specs(ctx.is_owner).iter().map(|s| s.name).collect::<Vec<_>>().join(", ")
+            specs(ctx.is_owner, true).iter().map(|s| s.name).collect::<Vec<_>>().join(", ")
         ));
     };
     if spec.owner_only && !ctx.is_owner {
@@ -509,6 +550,8 @@ pub async fn run(call: &ToolCall, ctx: &ToolCtx<'_>) -> ToolOutcome {
     let args = &call.args;
     let result: Result<String, String> = match spec.name {
         "get_time" => Ok(system::get_time()),
+        "time_in" => system::time_in(s_arg(args, &["place", "location", "zone", "tz", "city", "country", "raw"]).unwrap_or("")),
+        "events" => discord::events(ctx).await,
         "calculator" => {
             let expr = s_arg(args, &["expression", "expr", "input", "query", "equation", "math", "problem", "raw"]).unwrap_or("");
             calc::calculate(expr).map_err(|e| format!("calculator error: {e}"))
@@ -740,11 +783,13 @@ mod tests {
 
     #[test]
     fn specs_hide_owner_tools() {
-        assert!(specs(false).iter().all(|s| !s.owner_only));
-        assert!(specs(true).iter().any(|s| s.name == "run_command"));
-        let docs = text_docs(false);
+        assert!(specs(false, false).iter().all(|s| !s.owner_only && !s.extra));
+        assert!(specs(true, false).iter().any(|s| s.name == "run_command"));
+        assert!(specs(false, true).iter().any(|s| s.name == "events"));
+        let docs = text_docs(false, false);
         assert!(docs.contains("calculator"));
         assert!(!docs.contains("run_command"));
-        assert!(native_tools(true).as_array().unwrap().len() >= 18);
+        assert!(!docs.contains("time_in"));
+        assert_eq!(native_tools(true, false).as_array().unwrap().len(), 19);
     }
 }

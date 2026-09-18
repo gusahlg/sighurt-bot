@@ -51,6 +51,7 @@ async fn main() -> anyhow::Result<()> {
         news_feeds: vec!["https://feeds.bbci.co.uk/news/world/rss.xml".into(), "https://hnrss.org/frontpage".into()],
         persona,
         legacy_render: false,
+        extra_tools: std::env::var("SIG_EXTRA_TOOLS").map(|v| v == "1").unwrap_or(false),
     };
     let backend = OpenAiBackend::new(&endpoint, &api_key, "sig", 180, false)?;
     let directory = Arc::new(Directory::new());

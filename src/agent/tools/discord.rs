@@ -685,6 +685,64 @@ pub async fn who_is(ctx: &ToolCtx<'_>, name: &str) -> Result<String, String> {
     Ok(out)
 }
 
+/// Upcoming scheduled events (the studio's event nights are the heartbeat of
+/// this server).
+pub async fn events(ctx: &ToolCtx<'_>) -> Result<String, String> {
+    let Some(guild_id) = ctx.guild_id else {
+        return Err("events error: only works inside a server".to_string());
+    };
+    let resp = ctx
+        .http
+        .guild_scheduled_events(Id::<GuildMarker>::new(guild_id))
+        .await
+        .map_err(|e| format!("events error: {e}"))?;
+    let mut list = resp.models().await.map_err(|e| format!("events error: {e}"))?;
+    let now = chrono::Utc::now().timestamp();
+    list.retain(|e| e.scheduled_start_time.as_secs() >= now - 3 * 3600);
+    list.sort_by_key(|e| e.scheduled_start_time.as_secs());
+    if list.is_empty() {
+        return Ok("events: nothing scheduled right now. walnutty has been slacking".to_string());
+    }
+    let lines: Vec<String> = list
+        .iter()
+        .take(6)
+        .map(|e| {
+            let start = chrono::DateTime::<chrono::Utc>::from_timestamp(e.scheduled_start_time.as_secs(), 0)
+                .map(|t| t.with_timezone(&chrono::Local))
+                .map(|t| t.format("%a %Y-%m-%d %H:%M %Z").to_string())
+                .unwrap_or_else(|| "?".to_string());
+            let delta = e.scheduled_start_time.as_secs() - now;
+            let when = if delta < 0 {
+                "happening now".to_string()
+            } else if delta < 3600 {
+                format!("in {} min", delta / 60)
+            } else if delta < 48 * 3600 {
+                format!("in {}h", delta / 3600)
+            } else {
+                format!("in {} days", delta / 86400)
+            };
+            let place = e
+                .entity_metadata
+                .as_ref()
+                .and_then(|m| m.location.clone())
+                .or_else(|| e.channel_id.and_then(|c| ctx.directory.channel_name(c.get()).map(|n| format!("#{n}"))))
+                .unwrap_or_else(|| "somewhere on the server".to_string());
+            let mut line = format!("- {} ({when}) {}: {place}", start, e.name);
+            if let Some(n) = e.user_count {
+                line.push_str(&format!(", {n} interested"));
+            }
+            if let Some(d) = &e.description {
+                let d = d.split_whitespace().collect::<Vec<_>>().join(" ");
+                if !d.is_empty() {
+                    line.push_str(&format!(" ({})", d.chars().take(140).collect::<String>()));
+                }
+            }
+            line
+        })
+        .collect();
+    Ok(format!("upcoming events:\n{}", lines.join("\n")))
+}
+
 #[allow(dead_code)]
 pub async fn server_status(ctx: &ToolCtx<'_>) -> Result<String, String> {
     let Some(guild_id) = ctx.guild_id else {

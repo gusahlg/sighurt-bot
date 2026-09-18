@@ -199,6 +199,10 @@ pub struct ChatConfig {
     /// RSS/Atom feeds for the `news` tool when no topic is given.
     #[serde(default = "default_news_feeds")]
     pub news_feeds: Vec<String>,
+    /// Offer tools that were not in the schema the live model was trained with
+    /// (events, time_in). Off for a fresh model until it has been evaluated.
+    #[serde(default)]
+    pub extra_tools: bool,
 }
 
 /// Two-step content filter over the bot's own outgoing chat replies: a
@@ -509,6 +513,7 @@ impl Default for ChatConfig {
             persona_file: default_persona_file(),
             memory_dir: default_memory_dir(),
             news_feeds: default_news_feeds(),
+            extra_tools: false,
         }
     }
 }

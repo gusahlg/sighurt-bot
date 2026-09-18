@@ -77,6 +77,7 @@ fn build_backend(cfg: &ChatConfig, api_key: &str, search: Option<WebSearchClient
                 news_feeds: cfg.news_feeds.clone(),
                 persona,
                 legacy_render: kind == "completion",
+                extra_tools: cfg.extra_tools,
             };
             let backend = OpenAiBackend::new(&cfg.endpoint_url, api_key, &cfg.model, cfg.request_timeout_secs, cfg.thinking)?;
             let reminders = Arc::new(ReminderStore::load(PathBuf::from(&cfg.memory_dir).join("reminders.jsonl")));

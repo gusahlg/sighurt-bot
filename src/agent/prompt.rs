@@ -94,7 +94,7 @@ impl ToolFormat {
 }
 
 /// Build the system prompt: persona + situation (+ text tool docs).
-pub fn system_prompt(persona: &str, situation: &Situation, user: &str, format: ToolFormat, is_owner: bool, sudo: bool) -> String {
+pub fn system_prompt(persona: &str, situation: &Situation, user: &str, format: ToolFormat, is_owner: bool, sudo: bool, extras: bool) -> String {
     let _ = (situation, user);
     let mut s = String::with_capacity(persona.len() + 1200);
     s.push_str(persona.trim_end());
@@ -105,7 +105,7 @@ pub fn system_prompt(persona: &str, situation: &Situation, user: &str, format: T
     if format == ToolFormat::Text {
         s.push_str("\n\n");
         s.push_str(TEXT_PROTOCOL);
-        s.push_str(&super::tools::text_docs(is_owner));
+        s.push_str(&super::tools::text_docs(is_owner, extras));
     }
     if format != ToolFormat::None {
         if is_owner {
@@ -320,7 +320,7 @@ mod tests {
 
     #[test]
     fn messages_shape() {
-        let sys = system_prompt(DEFAULT_PERSONA, &Situation::default(), "zunabaro", ToolFormat::Native, false, false);
+        let sys = system_prompt(DEFAULT_PERSONA, &Situation::default(), "zunabaro", ToolFormat::Native, false, false, false);
         let situ = Situation { now: "Thursday 2026-09-18 09:00 CEST".into(), channel_name: Some("general".into()), ..Default::default() };
         let m = build_messages(&sys, &req(), ToolFormat::Native, &situ);
         assert_eq!(m[0]["role"], "system");
@@ -332,7 +332,7 @@ mod tests {
         let text = build_messages(&sys, &req(), ToolFormat::Text, &situ);
         assert_eq!(text[1]["content"], "walnutty2: fries in the bag");
         assert!(text.last().unwrap()["content"].as_str().unwrap().ends_with("(reply as Sig)"));
-        assert!(system_prompt(DEFAULT_PERSONA, &Situation::default(), "x", ToolFormat::Text, false, false).contains("TOOL_CALL"));
+        assert!(system_prompt(DEFAULT_PERSONA, &Situation::default(), "x", ToolFormat::Text, false, false, false).contains("TOOL_CALL"));
         assert!(!sys.contains("TOOL_CALL"));
     }
 

@@ -105,14 +105,15 @@ fn main() {
             online_count: sv.get("online_count").and_then(Value::as_u64),
             voice: sv["voice"].as_array().into_iter().flatten().filter_map(|x| x.as_str().map(str::to_string)).collect(),
         };
-        let system = prompt::system_prompt(&persona, &situation, &request.user, format, is_owner, sudo);
+        let extras = b(&v, "extra_tools");
+        let system = prompt::system_prompt(&persona, &situation, &request.user, format, is_owner, sudo, extras);
         let messages = if request.react {
             prompt::build_react_messages(&system, &request, &situation)
         } else {
             prompt::build_messages(&system, &request, format, &situation)
         };
         let tools = match format {
-            ToolFormat::Native => tools::native_tools(is_owner),
+            ToolFormat::Native => tools::native_tools(is_owner, extras),
             _ => Value::Null,
         };
         let _ = writeln!(out, "{}", json!({"messages": messages, "tools": tools}));

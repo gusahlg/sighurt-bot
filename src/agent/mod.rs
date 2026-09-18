@@ -38,6 +38,8 @@ pub struct AgentConfig {
     pub persona: String,
     /// Raw legacy render (`/completion`) instead of chat messages.
     pub legacy_render: bool,
+    /// Offer the tools that are not in the trained schema (events, time_in).
+    pub extra_tools: bool,
 }
 
 /// Everything the agent needs across requests.
@@ -140,7 +142,7 @@ impl Agent {
         // A poke never gets tool docs, but if the model still emits a tool call
         // (the v6 LoRA does), honour it rather than posting the glitch line.
         let tools_allowed = self.cfg.tool_format != ToolFormat::None && !request.react;
-        let system = prompt::system_prompt(&self.cfg.persona, situation, &request.user, format, is_owner, sudo_password.is_some());
+        let system = prompt::system_prompt(&self.cfg.persona, situation, &request.user, format, is_owner, sudo_password.is_some(), self.cfg.extra_tools);
         if request.react {
             let messages = prompt::build_react_messages(&system, &request, situation);
             let c = self.backend.chat(&messages, None, &self.cfg.sampling, 12, STOP).await?;
@@ -149,7 +151,7 @@ impl Agent {
 
         let mut messages = prompt::build_messages(&system, &request, format, situation);
         let native_tools = match format {
-            ToolFormat::Native => Some(tools::native_tools(is_owner)),
+            ToolFormat::Native => Some(tools::native_tools(is_owner, self.cfg.extra_tools)),
             _ => None,
         };
         let ctx = ToolCtx {
