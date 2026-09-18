@@ -98,6 +98,7 @@ pub fn create_command() -> Command {
             string_choice("1.1B (small fallback brain)", "1.1b"),
             string_choice("3B (bespoke, tools)", "3b"),
             string_choice("16B (bespoke, tools — the big brain)", "16b"),
+            string_choice("Q3 (Qwen3-14B base, native tools — next gen)", "q3"),
         ],
     );
     // computers: which machine(s); the value IS the machines CSV serve_mode wants.
@@ -184,10 +185,10 @@ async fn apply(model: &str, machines: &str) -> String {
     if machines == "server" && model != "1.1b" {
         return "**server** (GTX 1650, 4GB) only hosts the **1.1B**. For 3B/16B pick desktop or desktop+louise.".to_string();
     }
-    if model == "16b" && !machines.split(',').any(|m| m == "louise") {
-        return "**16B** needs at least **desktop + louise** (a single 8GB GPU can't hold it).".to_string();
+    if matches!(model, "16b" | "q3") && !machines.split(',').any(|m| m == "louise") {
+        return format!("**{model}** needs at least **desktop + louise** (a single 8GB GPU can't hold it).");
     }
-    if !machines.chars().all(|c| c.is_ascii_lowercase() || c == ',') || !matches!(model, "1.1b" | "3b" | "16b") {
+    if !machines.chars().all(|c| c.is_ascii_lowercase() || c == ',') || !matches!(model, "1.1b" | "3b" | "16b" | "q3") {
         return "Unknown model/computers value.".to_string();
     }
 
