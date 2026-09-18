@@ -64,6 +64,11 @@ serde_json = "1"
 # systemd readiness + watchdog pings (no-op outside systemd).
 sd-notify = "0.4"
 
+# Agent layer (src/agent): reply hygiene regexes, local-time handling for the
+# clock/reminder tools. Both are already in the dependency tree.
+regex = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
 # AI mode support (feature-gated for optional build)
 [features]
 default = []

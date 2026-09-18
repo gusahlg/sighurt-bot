@@ -1,5 +1,9 @@
-//! HTTP client that calls the SuperSighurt LLM server living on the desktop.
+//! The chat runtime: either the classic `/chat` client for the tensor-ash
+//! server (1.1B), or the in-process agent (persona + tools) talking to an
+//! OpenAI-compatible model server.
 
+use crate::agent::prompt::Situation;
+use crate::agent::Agent;
 use crate::config::ChatConfig;
 use crate::reply_filter::ReplyFilter;
 use crate::web_search::{WebSearchClient, WebSearchContext};
@@ -8,15 +12,24 @@ use serde::Deserialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use twilight_http::Client;
 
-/// Wraps a `ChatClient` with a runtime on/off toggle.
+/// Which brain answers.
+pub enum Backend {
+    /// serve_llama `/chat` contract (prompt rendered server-side, no tools).
+    Sighurt(ChatClient),
+    /// The bot's own agent loop over an OpenAI-compatible / raw completion server.
+    Agent(Arc<Agent>),
+}
+
+/// Wraps the backend with a runtime on/off toggle.
 ///
 /// The toggle is an `AtomicBool` so the `/ai on|off` slash command can flip it
 /// without needing a lock or a config reload. Authorization for that command
 /// (and `/moderation`, `/filterword`) is the Discord **Administrator**
 /// permission, enforced in the command handlers — not an allowlist here.
 pub struct ChatRuntime {
-    client: ChatClient,
+    backend: Backend,
     enabled: AtomicBool,
     respond_to_bots: bool,
     max_bot_chain: u32,
@@ -36,13 +49,13 @@ pub struct ChatRuntime {
 
 impl ChatRuntime {
     pub fn new(
-        client: ChatClient,
+        backend: Backend,
         cfg: &ChatConfig,
         web_search: Option<WebSearchClient>,
         filter: ReplyFilter,
     ) -> Arc<Self> {
         Arc::new(Self {
-            client,
+            backend,
             enabled: AtomicBool::new(cfg.enabled),
             respond_to_bots: cfg.respond_to_bots,
             max_bot_chain: cfg.max_bot_chain,
@@ -116,8 +129,40 @@ impl ChatRuntime {
         self.react_probability
     }
 
-    pub fn client(&self) -> &ChatClient {
-        &self.client
+    /// The in-process agent, when the configured backend is one.
+    pub fn agent(&self) -> Option<&Arc<Agent>> {
+        match &self.backend {
+            Backend::Agent(agent) => Some(agent),
+            Backend::Sighurt(_) => None,
+        }
+    }
+
+    /// Short label for logs / `/set status`.
+    pub fn backend_label(&self) -> String {
+        match &self.backend {
+            Backend::Sighurt(c) => format!("sighurt {}", c.endpoint),
+            Backend::Agent(a) => format!(
+                "agent {} ({:?}{})",
+                a.backend().endpoint(),
+                a.cfg.tool_format,
+                if a.cfg.legacy_render { ", legacy render" } else { "" }
+            ),
+        }
+    }
+
+    /// Produce one reply through whichever backend is configured.
+    pub async fn reply(
+        &self,
+        http: &Client,
+        request: &ChatRequest,
+        situation: &Situation,
+        bot_user_id: u64,
+        guild_id: Option<u64>,
+    ) -> Result<String> {
+        match &self.backend {
+            Backend::Sighurt(client) => client.reply(request).await,
+            Backend::Agent(agent) => agent.reply(http, request, situation, bot_user_id, guild_id).await,
+        }
     }
 
     pub fn web_search(&self) -> Option<&WebSearchClient> {
@@ -186,7 +231,7 @@ struct ChatResponse {
 
 #[derive(Clone)]
 pub struct ChatClient {
-    endpoint: String,
+    pub endpoint: String,
     api_key: String,
     http: reqwest::Client,
 }

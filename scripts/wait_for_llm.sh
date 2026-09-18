@@ -33,12 +33,16 @@ case "$WAIT_SECONDS" in
         ;;
 esac
 
+# llama-server answers /health; serve_llama and the old adapters answer /healthz.
+ALT_URL="${HEALTH_URL%/healthz}/health"
 deadline=$((SECONDS + WAIT_SECONDS))
 while ((SECONDS < deadline)); do
-    if curl --fail --silent --max-time 2 "$HEALTH_URL" >/dev/null; then
-        echo "wait_for_llm: ready at $HEALTH_URL"
-        exit 0
-    fi
+    for url in "$HEALTH_URL" "$ALT_URL"; do
+        if curl --fail --silent --max-time 2 "$url" >/dev/null; then
+            echo "wait_for_llm: ready at $url"
+            exit 0
+        fi
+    done
     sleep 1
 done
 

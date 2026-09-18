@@ -1,14 +1,14 @@
 mod ai;
 mod automod;
 mod channel_state;
-mod chat;
 mod commands;
-mod config;
 mod database;
 mod events;
-mod reply_filter;
 mod voice;
-mod web_search;
+
+// Shared with the probe/scraper binaries through the library crate; the
+// `use` bindings keep `crate::chat::…` paths valid in the binary's modules.
+use discord_bot::{agent, chat, config, reply_filter, web_search};
 
 use anyhow::Result;
 use futures_util::StreamExt;
@@ -24,14 +24,68 @@ use twilight_http::Client;
 use twilight_model::channel::message::AllowedMentions;
 use twilight_model::id::Id;
 
+use crate::agent::backend::{OpenAiBackend, Sampling};
+use crate::agent::prompt::{ToolFormat, DEFAULT_PERSONA};
+use crate::agent::tools::discord::Directory;
+use crate::agent::tools::memory::ReminderStore;
+use crate::agent::{Agent, AgentConfig};
 use crate::ai::{AiConfig, AiProcessor, AiProviderConfig};
 use crate::automod::AutoMod;
 use crate::channel_state::ChannelState;
-use crate::chat::{ChatClient, ChatRuntime};
-use crate::config::Config;
+use crate::chat::{Backend, ChatClient, ChatRuntime};
+use crate::config::{ChatConfig, Config};
 use crate::voice::VoiceBridge;
 use crate::web_search::WebSearchClient;
 use discord_bot::scrape;
+use std::path::PathBuf;
+
+/// Pick the brain from `chat.backend`: the classic tensor-ash `/chat` client,
+/// or the in-process agent over an OpenAI-compatible / raw completion server.
+fn build_backend(cfg: &ChatConfig, api_key: &str, search: Option<WebSearchClient>) -> Result<Backend> {
+    match cfg.backend.trim() {
+        "sighurt" => Ok(Backend::Sighurt(ChatClient::new(cfg, api_key.to_string())?)),
+        kind @ ("openai" | "completion") => {
+            let persona = match std::fs::read_to_string(&cfg.persona_file) {
+                Ok(text) if !text.trim().is_empty() => {
+                    tracing::info!("Persona loaded from {}", cfg.persona_file);
+                    text
+                }
+                _ => {
+                    tracing::info!("Persona file {} missing; using the built-in persona", cfg.persona_file);
+                    DEFAULT_PERSONA.to_string()
+                }
+            };
+            let tool_format = ToolFormat::parse(&cfg.tool_format).unwrap_or(ToolFormat::Native);
+            let agent_cfg = AgentConfig {
+                tool_format: if kind == "completion" { ToolFormat::None } else { tool_format },
+                max_tool_iters: cfg.max_tool_iters,
+                max_reply_tokens: cfg.max_reply_tokens,
+                max_tool_tokens: cfg.max_tool_tokens,
+                sampling: Sampling {
+                    temperature: cfg.temperature,
+                    top_p: cfg.top_p,
+                    top_k: cfg.top_k,
+                    min_p: cfg.min_p,
+                    repeat_penalty: cfg.repeat_penalty,
+                    repeat_last_n: cfg.repeat_last_n,
+                    presence_penalty: 0.0,
+                },
+                owner_user_id: cfg.owner_user_id,
+                rules_channel_id: cfg.rules_channel_id,
+                data_root: PathBuf::from("data/channels"),
+                memory_dir: PathBuf::from(&cfg.memory_dir),
+                news_feeds: cfg.news_feeds.clone(),
+                persona,
+                legacy_render: kind == "completion",
+            };
+            let backend = OpenAiBackend::new(&cfg.endpoint_url, api_key, &cfg.model, cfg.request_timeout_secs, cfg.thinking)?;
+            let reminders = Arc::new(ReminderStore::load(PathBuf::from(&cfg.memory_dir).join("reminders.jsonl")));
+            let agent = Agent::new(agent_cfg, backend, Arc::new(Directory::new()), reminders, search)?;
+            Ok(Backend::Agent(Arc::new(agent)))
+        }
+        other => anyhow::bail!("unknown chat.backend {other:?}"),
+    }
+}
 
 /// How long the merged shard stream may go silent before we assume the
 /// gateway is wedged. A healthy connection carries at least a heartbeat ACK
@@ -97,40 +151,39 @@ async fn main() -> Result<()> {
     // the *initial* state of the runtime toggle, not whether the runtime exists,
     // so admins listed in `chat.admin_user_ids` can flip it via `!ai on`.
     let chat_runtime: Option<Arc<ChatRuntime>> = match env::var("LLM_API_KEY") {
-        Ok(key) => match ChatClient::new(&config.chat, key).and_then(|client| {
+        Ok(key) => {
+            let search = match WebSearchClient::new(&config.chat, env::var("BRAVE_SEARCH_API_KEY").ok()) {
+                Ok(search) => search,
+                Err(e) => {
+                    tracing::error!("Failed to build web-search client: {}; live search disabled", e);
+                    None
+                }
+            };
             // The outgoing-reply word filter belongs to the chat runtime: a
             // filter build error (bad judge config) disables chat entirely
             // rather than silently running unfiltered.
-            let filter = reply_filter::ReplyFilter::from_config(&config.filter)?;
-            Ok((client, filter))
-        }) {
-            Ok((client, filter)) => {
-                tracing::info!("{}", filter.boot_summary());
-                let search = match WebSearchClient::new(
-                    &config.chat,
-                    env::var("BRAVE_SEARCH_API_KEY").ok(),
-                ) {
-                    Ok(search) => search,
-                    Err(e) => {
-                        tracing::error!("Failed to build web-search client: {}; live search disabled", e);
-                        None
-                    }
-                };
-                let runtime = ChatRuntime::new(client, &config.chat, search, filter);
-                tracing::info!(
-                    "Chat runtime ready (initial = {}); LLM endpoint = {}; admins = {}; web search = {}",
-                    if config.chat.enabled { "ON" } else { "OFF" },
-                    config.chat.endpoint_url,
-                    config.chat.admin_user_ids.len(),
-                    if config.chat.web_search_enabled { "ON" } else { "OFF" },
-                );
-                Some(runtime)
+            let built = reply_filter::ReplyFilter::from_config(&config.filter).and_then(|filter| {
+                let backend = build_backend(&config.chat, &key, search.clone())?;
+                Ok((backend, filter))
+            });
+            match built {
+                Ok((backend, filter)) => {
+                    tracing::info!("{}", filter.boot_summary());
+                    let runtime = ChatRuntime::new(backend, &config.chat, search, filter);
+                    tracing::info!(
+                        "Chat runtime ready (initial = {}); brain = {}; web search = {}",
+                        if config.chat.enabled { "ON" } else { "OFF" },
+                        runtime.backend_label(),
+                        if config.chat.web_search_enabled { "ON" } else { "OFF" },
+                    );
+                    Some(runtime)
+                }
+                Err(e) => {
+                    tracing::error!("Failed to build chat backend: {:#}; chat disabled", e);
+                    None
+                }
             }
-            Err(e) => {
-                tracing::error!("Failed to build chat client: {}; chat disabled", e);
-                None
-            }
-        },
+        }
         Err(_) => {
             tracing::info!("LLM_API_KEY unset; chat runtime disabled");
             None
@@ -194,6 +247,43 @@ async fn main() -> Result<()> {
 
     // Register slash commands
     commands::register_commands(&http, Id::new(application_id)).await?;
+
+    // Agent housekeeping: keep the guild directory (channel names, member
+    // counts) fresh and fire due reminders. Both are cheap periodic tasks.
+    if let Some(agent) = chat_runtime.as_ref().and_then(|c| c.agent()).cloned() {
+        let dir_http = Arc::clone(&http);
+        let dir_agent = Arc::clone(&agent);
+        tokio::spawn(async move {
+            loop {
+                dir_agent.directory.refresh(&dir_http).await;
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+            }
+        });
+        let rem_http = Arc::clone(&http);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(20)).await;
+                let now = chrono::Utc::now().timestamp();
+                for r in agent.reminders.take_due(now) {
+                    let allowed = AllowedMentions {
+                        parse: Vec::new(),
+                        replied_user: false,
+                        roles: Vec::new(),
+                        users: vec![Id::new(r.user_id)],
+                    };
+                    let text = format!("⏰ <@{}> reminder: {}", r.user_id, r.text);
+                    match rem_http.create_message(Id::new(r.channel_id)).allowed_mentions(Some(&allowed)).content(&text) {
+                        Ok(builder) => {
+                            if let Err(e) = builder.await {
+                                tracing::warn!("reminder #{} failed to post: {e}", r.id);
+                            }
+                        }
+                        Err(e) => tracing::warn!("reminder #{} invalid content: {e}", r.id),
+                    }
+                }
+            }
+        });
+    }
 
     // Create automod
     let automod = Arc::new(AutoMod::new(pool.clone(), Arc::clone(&http)));

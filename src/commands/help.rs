@@ -55,7 +55,14 @@ const HELP_TEXT: &str = "\
 • `/autorole ...` — configure the role given to new members
 
 *Owner only*
-• `/set config <model> <computers>` — pick which bespoke model runs on which machine(s)";
+• `/set config <model> <computers>` — pick which bespoke model runs on which machine(s)
+• `/set status` — which brain is live + what the last switch did
+
+*Talking to Sig*
+@mention him, reply to him, or DM him. He has tools: math, dice, units, time,
+weather, web search, wikipedia, news, reading a link, dictionary/urban,
+server rules, searching this server's history, who-is, what's-happening,
+reminders (\"remind me in 20 min to …\"), notes and a diary.";
 
 pub async fn handle(
     _interaction: &Interaction,

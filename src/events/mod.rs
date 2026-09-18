@@ -165,6 +165,14 @@ pub async fn handle_event(
                 }
             }
         }
+        // The agent keeps its own voice-occupancy map so Sig can say who is
+        // in voice right now (the songbird cache in main only tracks joins for
+        // the `!voice` command).
+        Event::VoiceStateUpdate(update) => {
+            if let Some(agent) = chat.as_ref().and_then(|c| c.agent()) {
+                agent.directory.apply_voice(&update.0);
+            }
+        }
         Event::GatewayReconnect => {
             tracing::info!("Gateway reconnecting...");
         }

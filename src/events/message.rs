@@ -2,13 +2,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::agent::prompt::Situation;
 use crate::ai::AiProcessor;
 use crate::automod::{AutoMod, AutoModAction};
 use crate::channel_state::ChannelState;
 use crate::chat::{ChatContextMessage, ChatReplyTo, ChatRequest, ChatRuntime};
 use crate::reply_filter::ReplyScreen;
 use crate::voice::{self, VoiceBridge};
-use crate::web_search::{explicit_search_query, WebSearchContext, WebSearchResult};
+use crate::web_search::{explicit_search_query, WebSearchContext};
 use anyhow::Result;
 use discord_bot::channel_log;
 use twilight_http::Client;
@@ -330,8 +331,10 @@ async fn run_chat_reply(
         web_search,
         react: false,
     };
+    let situation = build_situation(chat, message).await;
+    let guild_id = message.guild_id.map(|g| g.get());
 
-    match chat.client().reply(&request).await {
+    match chat.reply(http, &request, &situation, bot_user_id.get(), guild_id).await {
         Ok(reply) => {
             let trimmed = reply.trim();
             if trimmed.is_empty() {
@@ -438,6 +441,31 @@ async fn run_chat_reply(
     Ok(())
 }
 
+/// Live facts about where the trigger happened, for the agent's system prompt.
+/// Cheap: everything comes from the agent's in-memory directory (refreshed
+/// hourly) — no REST calls on the reply path. Empty for the classic backend.
+async fn build_situation(chat: &ChatRuntime, message: &Message) -> Situation {
+    let Some(agent) = chat.agent() else {
+        return Situation::default();
+    };
+    let dir = &agent.directory;
+    let mut situation = Situation {
+        now: crate::agent::tools::system::now_line(),
+        is_dm: message.guild_id.is_none(),
+        ..Default::default()
+    };
+    if let Some(guild_id) = message.guild_id.map(|g| g.get()) {
+        situation.guild_name = dir.guild_name(guild_id);
+        situation.channel_name = dir.channel_name(message.channel_id.get());
+        if let Some((members, online)) = dir.member_counts(guild_id) {
+            situation.member_count = Some(members);
+            situation.online_count = online;
+        }
+        situation.voice = dir.voice_lines(guild_id);
+    }
+    situation
+}
+
 /// Rate-limit gate for moderation/error notices: at most one per channel per
 /// `notice_cooldown_secs`. A cooldown of 0 disables the limit.
 fn notice_allowed(chat: &ChatRuntime, channel_state: &ChannelState, message: &Message) -> bool {
@@ -533,7 +561,9 @@ fn maybe_react(
             web_search: None,
             react: true,
         };
-        let reply = match chat.client().reply(&request).await {
+        let situation = build_situation(&chat, &message).await;
+        let guild_id = message.guild_id.map(|g| g.get());
+        let reply = match chat.reply(&http, &request, &situation, bot_user_id.get(), guild_id).await {
             Ok(reply) => reply,
             Err(e) => {
                 tracing::debug!("React round-trip failed: {:#}", e);
@@ -1162,6 +1192,7 @@ async fn resolve_outgoing_pings(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::web_search::WebSearchResult;
     use twilight_model::guild::{MemberFlags, PartialMember};
     use twilight_model::user::UserFlags;
     use twilight_model::util::Timestamp;

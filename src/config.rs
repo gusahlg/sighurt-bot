@@ -140,6 +140,65 @@ pub struct ChatConfig {
     /// broken backend can't spam a channel with error messages. 0 = no limit.
     #[serde(default = "default_notice_cooldown_secs")]
     pub notice_cooldown_secs: u64,
+
+    // ---- agent backend (src/agent) -------------------------------------
+    /// Which wire protocol `endpoint_url` speaks:
+    ///   "sighurt"    — the classic serve_llama `/chat` contract (1.1B on
+    ///                  nixos-server, tensor-ash). No tools; prompt rendered
+    ///                  server-side.
+    ///   "openai"     — an OpenAI-compatible `/v1/chat/completions` server
+    ///                  (llama.cpp `llama-server`). The bot runs the persona +
+    ///                  tool agent loop itself.
+    ///   "completion" — llama.cpp raw `/completion` with the legacy prompt
+    ///                  render (1.1B over llama.cpp, no tools).
+    #[serde(default = "default_backend")]
+    pub backend: String,
+    /// Model name sent to an OpenAI-style backend (llama-server ignores it).
+    #[serde(default = "default_model_name")]
+    pub model: String,
+    /// Tool-call syntax for the openai backend: "native" (chat-template
+    /// `<tool_call>` via the `tools` field, Qwen3), "text" (legacy
+    /// `TOOL_CALL:` lines the bespoke v6 LoRA learned), or "none".
+    #[serde(default = "default_tool_format")]
+    pub tool_format: String,
+    /// Let a Qwen3-style model think before answering (slower, usually not
+    /// worth it for chat).
+    #[serde(default)]
+    pub thinking: bool,
+    #[serde(default = "default_max_tool_iters")]
+    pub max_tool_iters: usize,
+    #[serde(default = "default_max_reply_tokens")]
+    pub max_reply_tokens: u32,
+    #[serde(default = "default_max_tool_tokens")]
+    pub max_tool_tokens: u32,
+    #[serde(default = "default_temperature")]
+    pub temperature: f64,
+    #[serde(default = "default_top_p")]
+    pub top_p: f64,
+    #[serde(default = "default_top_k")]
+    pub top_k: u32,
+    #[serde(default = "default_min_p")]
+    pub min_p: f64,
+    #[serde(default = "default_repeat_penalty")]
+    pub repeat_penalty: f64,
+    #[serde(default = "default_repeat_last_n")]
+    pub repeat_last_n: u32,
+    /// The one Discord user allowed to use owner-only tools (run_command) and
+    /// `/set config`.
+    #[serde(default = "default_owner_user_id")]
+    pub owner_user_id: u64,
+    /// Channel whose messages are the server rules (for `lookup_rule`).
+    #[serde(default)]
+    pub rules_channel_id: Option<u64>,
+    /// Plain-text persona/system prompt. Missing file = built-in default.
+    #[serde(default = "default_persona_file")]
+    pub persona_file: String,
+    /// Where notes/diary/reminders live.
+    #[serde(default = "default_memory_dir")]
+    pub memory_dir: String,
+    /// RSS/Atom feeds for the `news` tool when no topic is given.
+    #[serde(default = "default_news_feeds")]
+    pub news_feeds: Vec<String>,
 }
 
 /// Two-step content filter over the bot's own outgoing chat replies: a
@@ -290,6 +349,75 @@ fn default_judge_timeout_secs() -> u64 {
     45
 }
 
+fn default_backend() -> String {
+    "sighurt".to_string()
+}
+
+fn default_model_name() -> String {
+    "sig".to_string()
+}
+
+fn default_tool_format() -> String {
+    "native".to_string()
+}
+
+fn default_max_tool_iters() -> usize {
+    4
+}
+
+fn default_max_reply_tokens() -> u32 {
+    220
+}
+
+fn default_max_tool_tokens() -> u32 {
+    260
+}
+
+fn default_temperature() -> f64 {
+    0.7
+}
+
+fn default_top_p() -> f64 {
+    0.9
+}
+
+fn default_top_k() -> u32 {
+    40
+}
+
+fn default_min_p() -> f64 {
+    0.05
+}
+
+fn default_repeat_penalty() -> f64 {
+    1.1
+}
+
+fn default_repeat_last_n() -> u32 {
+    256
+}
+
+fn default_owner_user_id() -> u64 {
+    367334632515043329
+}
+
+fn default_persona_file() -> String {
+    "data/persona/system_prompt.txt".to_string()
+}
+
+fn default_memory_dir() -> String {
+    "data/memory".to_string()
+}
+
+fn default_news_feeds() -> Vec<String> {
+    vec![
+        "https://feeds.bbci.co.uk/news/world/rss.xml".to_string(),
+        "https://hnrss.org/frontpage".to_string(),
+        "https://www.svt.se/nyheter/rss.xml".to_string(),
+        "https://feeds.arstechnica.com/arstechnica/index".to_string(),
+    ]
+}
+
 fn default_judge_kind() -> String {
     "guard".to_string()
 }
@@ -363,6 +491,24 @@ impl Default for ChatConfig {
             notify_on_rejection: true,
             notify_on_error: true,
             notice_cooldown_secs: default_notice_cooldown_secs(),
+            backend: default_backend(),
+            model: default_model_name(),
+            tool_format: default_tool_format(),
+            thinking: false,
+            max_tool_iters: default_max_tool_iters(),
+            max_reply_tokens: default_max_reply_tokens(),
+            max_tool_tokens: default_max_tool_tokens(),
+            temperature: default_temperature(),
+            top_p: default_top_p(),
+            top_k: default_top_k(),
+            min_p: default_min_p(),
+            repeat_penalty: default_repeat_penalty(),
+            repeat_last_n: default_repeat_last_n(),
+            owner_user_id: default_owner_user_id(),
+            rules_channel_id: None,
+            persona_file: default_persona_file(),
+            memory_dir: default_memory_dir(),
+            news_feeds: default_news_feeds(),
         }
     }
 }
@@ -490,6 +636,21 @@ impl Config {
         }
         if !(0.0..=1.0).contains(&self.chat.react_probability) {
             anyhow::bail!("chat.react_probability must be in 0.0..=1.0");
+        }
+        if !matches!(self.chat.backend.trim(), "sighurt" | "openai" | "completion") {
+            anyhow::bail!("chat.backend must be \"sighurt\", \"openai\" or \"completion\"");
+        }
+        if !matches!(self.chat.tool_format.trim(), "native" | "text" | "none") {
+            anyhow::bail!("chat.tool_format must be \"native\", \"text\" or \"none\"");
+        }
+        if self.chat.max_tool_iters == 0 || self.chat.max_tool_iters > 8 {
+            anyhow::bail!("chat.max_tool_iters must be in 1..=8");
+        }
+        if self.chat.max_reply_tokens == 0 || self.chat.max_reply_tokens > 2000 {
+            anyhow::bail!("chat.max_reply_tokens must be in 1..=2000");
+        }
+        if !(0.0..=2.0).contains(&self.chat.temperature) || !(0.0..=1.0).contains(&self.chat.top_p) {
+            anyhow::bail!("chat.temperature must be in 0..=2 and chat.top_p in 0..=1");
         }
 
         // Validate reply-filter settings (same unconditional rule as chat:
@@ -706,6 +867,28 @@ mod tests {
         config.chat.enabled = false;
         config.chat.min_seconds_between_replies = 0;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_agent_defaults_and_validation() {
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.chat.backend, "sighurt");
+        assert_eq!(config.chat.tool_format, "native");
+        assert_eq!(config.chat.owner_user_id, 367334632515043329);
+        assert!(config.validate().is_ok());
+        let config: Config = toml::from_str(
+            "[chat]\nbackend = \"openai\"\ntool_format = \"text\"\nrules_channel_id = 5\nnews_feeds = [\"https://x/rss\"]\n",
+        )
+        .unwrap();
+        assert_eq!(config.chat.rules_channel_id, Some(5));
+        assert_eq!(config.chat.news_feeds, vec!["https://x/rss".to_string()]);
+        assert!(config.validate().is_ok());
+        let mut bad = Config::default();
+        bad.chat.backend = "carrier-pigeon".into();
+        assert!(bad.validate().is_err());
+        let mut bad = Config::default();
+        bad.chat.tool_format = "morse".into();
+        assert!(bad.validate().is_err());
     }
 
     #[test]

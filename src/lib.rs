@@ -5,7 +5,10 @@
 //! is binary-private (declared via `mod` in main.rs) so it doesn't pollute
 //! the public API or slow down `cargo doc`.
 
+pub mod agent;
 pub mod channel_log;
+pub mod chat;
 pub mod config;
 pub mod reply_filter;
 pub mod scrape;
+pub mod web_search;
